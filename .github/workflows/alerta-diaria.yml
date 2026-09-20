@@ -1,0 +1,34 @@
+name: Alerta diaria Mercado Público
+ 
+on:
+  schedule:
+    # 12:00 UTC ≈ 08:00-09:00 hora de Chile continental (según horario de verano).
+    # Se ejecuta de lunes a viernes (Mercado Público no publica licitaciones nuevas
+    # relevantes los fines de semana en la práctica, pero puedes cambiar a "*" para
+    # que corra todos los días).
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch: {}  # permite ejecutarlo manualmente desde la pestaña Actions para probar
+ 
+jobs:
+  alerta:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+ 
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+ 
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+ 
+      - name: Ejecutar script de alertas
+        env:
+          MP_TICKET: ${{ secrets.MP_TICKET }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python alerta_mercadopublico.py
+ 
