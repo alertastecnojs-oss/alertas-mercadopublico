@@ -9,10 +9,8 @@ Alerta diaria de Mercado Público (Chile) — Licitaciones + Compra Ágil
    región del comprador y palabras clave, usando el detalle completo de
    cada una (más preciso).
 
-2. Compra Ágil: NO tiene API pública, así que se obtiene con un navegador
-   real (Playwright) contra el buscador público
-   https://buscador.mercadopublico.cl/compra-agil — ver alerta_compra_agil.py
-   para el detalle y las limitaciones de este método.
+2. Compra Ágil: vía la API oficial api2.mercadopublico.cl (lanzada por
+   ChileCompra en mayo de 2026) — ver alerta_compra_agil.py para el detalle.
 
 Ambos resultados se combinan en un solo correo.
 
@@ -138,9 +136,10 @@ def obtener_licitaciones(fecha_ddmmaaaa):
 
 
 def obtener_compra_agil_seguro():
-    """Intenta obtener Compra Ágil vía Playwright; si algo falla (el sitio
-    cambió, quedó bloqueado, etc.) no debe tumbar todo el envío de correo —
-    solo se registra el error y se sigue sin esa sección."""
+    """Intenta obtener Compra Ágil vía la API oficial; si algo falla (ticket
+    sin permiso, cuota agotada, error del servicio, etc.) no debe tumbar
+    todo el envío de correo — solo se registra el error y se sigue sin
+    esa sección."""
     if not INCLUIR_COMPRA_AGIL:
         print("Compra Ágil desactivada (INCLUIR_COMPRA_AGIL=0).")
         return [], None
@@ -271,7 +270,7 @@ def main():
         print(f"Error consultando licitaciones: {e}", file=sys.stderr)
         licitaciones = []
 
-    print("=== Compra Ágil (Playwright) ===")
+    print("=== Compra Ágil (API oficial) ===")
     compra_agil, error_compra_agil = obtener_compra_agil_seguro()
 
     total = len(licitaciones) + len(compra_agil)
