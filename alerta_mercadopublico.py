@@ -50,7 +50,7 @@ INCLUIR_COMPRA_AGIL = os.environ.get("INCLUIR_COMPRA_AGIL", "1") != "0"
 
 API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 TIMEOUT = 20
-PAUSA_ENTRE_LLAMADAS = 0.3  # segundos, para no saturar la API
+PAUSA_ENTRE_LLAMADAS = 1.2  # segundos, para no saturar la API
 MAX_REINTENTOS_429 = 5
 ESPERA_BASE_REINTENTO = 3  # segundos, se duplica en cada reintento (backoff exponencial)
 
