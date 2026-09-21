@@ -50,53 +50,36 @@ INCLUIR_COMPRA_AGIL = os.environ.get("INCLUIR_COMPRA_AGIL", "1") != "0"
 
 API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 TIMEOUT = 20
-PAUSA_ENTRE_LLAMADAS = 1.2  # segundos, para no saturar la API
-MAX_REINTENTOS_429 = 5
-ESPERA_BASE_REINTENTO = 3  # segundos, se duplica en cada reintento (backoff exponencial)
+PAUSA_ENTRE_LLAMADAS = 3.5  # segundos, para no saturar la API
 
 # URL pública para ver el detalle de una licitación en el portal
 URL_DETALLE = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion={codigo}"
 
 
-def _get_con_reintentos(params):
-    """GET a la API de Licitaciones con reintentos automáticos si responde
-    429 (límite de tasa) — con backoff exponencial y respetando el header
-    Retry-After si la API lo envía."""
-    intento = 0
-    while True:
-        resp = requests.get(API_BASE, params=params, timeout=TIMEOUT)
-        if resp.status_code != 429:
-            resp.raise_for_status()
-            return resp.json()
-
-        intento += 1
-        if intento > MAX_REINTENTOS_429:
-            resp.raise_for_status()  # deja que falle con el 429 como antes
-
-        espera = ESPERA_BASE_REINTENTO * (2 ** (intento - 1))
-        retry_after = resp.headers.get("Retry-After")
-        if retry_after:
-            try:
-                espera = max(espera, float(retry_after))
-            except ValueError:
-                pass
-        print(f"  aviso: 429 de la API, reintento {intento}/{MAX_REINTENTOS_429} en {espera:.0f}s...", file=sys.stderr)
-        time.sleep(espera)
+def _get(params):
+    """GET a la API de Licitaciones. Si la API responde 429 (límite de
+    tasa) u otro error, se propaga la excepción y quien llama decide qué
+    hacer — no hay reintentos: se prefiere saltar esa licitación y seguir
+    con las demás antes que alargar la corrida esperando."""
+    resp = requests.get(API_BASE, params=params, timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def obtener_licitaciones_del_dia(fecha_ddmmaaaa):
     """Trae el listado básico de licitaciones publicadas en la fecha dada."""
     params = {"fecha": fecha_ddmmaaaa, "estado": "publicada", "ticket": MP_TICKET}
-    data = _get_con_reintentos(params)
+    data = _get(params)
     return data.get("Listado", []) or []
 
 
 def obtener_detalle(codigo):
     """Trae el detalle completo de una licitación (región, ítems, etc.)."""
     params = {"codigo": codigo, "ticket": MP_TICKET}
-    data = _get_con_reintentos(params)
+    data = _get(params)
     listado = data.get("Listado", []) or []
     return listado[0] if listado else None
+
 
 
 def evaluar_licitacion(detalle):
