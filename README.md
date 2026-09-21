@@ -1,14 +1,30 @@
 # Alertas diarias de Mercado Público — Región del Maule y Ñuble
 
-Revisa cada día las **Licitaciones** nuevas publicadas en Mercado Público que
-coincidan con tus palabras clave (cámaras, vigilancia, enlaces, ANPR, CCTV,
-televigilancia, redes, telecomunicaciones) y estén en la Región del Maule o
-Ñuble, y te envía un correo con el resumen.
+Revisa cada día las oportunidades nuevas de Mercado Público que coincidan
+con tus palabras clave (cámaras, vigilancia, enlaces, ANPR, CCTV,
+televigilancia, redes, telecomunicaciones) y estén en la Región del Maule
+o Ñuble, y te envía un correo con el resumen. Cubre dos mecanismos:
 
-⚠️ **Compra Ágil no tiene API pública** (solo Licitaciones, Trato Directo y
-Convenio Marco). Este sistema cubre Licitaciones; para Compra Ágil sigue
-siendo necesario mantener tus rubros actualizados en tu Escritorio de
-Proveedor.
+1. **Licitaciones** — vía la API oficial `api.mercadopublico.cl`. Robusto,
+   con contrato estable.
+2. **Compra Ágil** — vía un navegador real (Playwright) contra el buscador
+   público `buscador.mercadopublico.cl/compra-agil`, porque **este
+   mecanismo no tiene API pública** (confirmado: ni la API clásica ni la
+   API OCDS de ChileCompra lo exponen).
+
+## ⚠️ Antes de usarlo, entiende la diferencia entre ambas partes
+
+| | Licitaciones (API) | Compra Ágil (navegador) |
+|---|---|---|
+| Fuente | API oficial documentada | Buscador web público, sin API |
+| Estabilidad | Alta — contrato estable | Media/baja — depende del HTML actual del sitio |
+| Qué pasa si ChileCompra cambia algo | No afecta | Puede romperse hasta que se actualice el script |
+| Qué pasa si falla | Error visible | **No corta el correo**: se envía igual, con un aviso de que Compra Ágil falló ese día |
+
+Si el sitio de Mercado Público rediseña esa página del buscador, la parte
+de Compra Ágil puede dejar de funcionar (dará 0 resultados o un error) sin
+que sea un problema con tu configuración — revisa los logs de Actions de
+vez en cuando para notarlo a tiempo.
 
 ## Paso 1 — Crear el repositorio en GitHub
 
@@ -19,24 +35,15 @@ Proveedor.
 
 ## Paso 2 — Obtener una "contraseña de aplicación" de Gmail
 
-Para que el script pueda enviar correos desde tu cuenta de Gmail sin exponer
-tu contraseña real:
-
 1. Activa la verificación en 2 pasos en tu cuenta de Google (si no la tienes).
 2. Ve a https://myaccount.google.com/apppasswords
 3. Genera una contraseña de aplicación (elige "Otra" y ponle un nombre, ej.
    "Alertas Mercado Público").
-4. Copia la contraseña de 16 caracteres que te entrega — la vas a necesitar
-   en el paso siguiente.
-
-Si prefieres usar otro proveedor de correo (Outlook, un dominio propio,
-etc.), cambia `SMTP_HOST`/`SMTP_PORT` como variables de entorno en el
-workflow (por defecto usa Gmail).
+4. Copia la contraseña de 16 caracteres que te entrega.
 
 ## Paso 3 — Configurar los "Secrets" en GitHub
 
-En tu repositorio: **Settings → Secrets and variables → Actions → New
-repository secret**. Crea estos cuatro secrets:
+**Settings → Secrets and variables → Actions → New repository secret**:
 
 | Nombre               | Valor                                                        |
 |----------------------|---------------------------------------------------------------|
@@ -45,40 +52,57 @@ repository secret**. Crea estos cuatro secrets:
 | `EMAIL_APP_PASSWORD` | La contraseña de aplicación de 16 caracteres del paso 2       |
 | `EMAIL_TO`           | El correo que recibe la alerta (puedes poner varios separados por coma) |
 
-Nunca escribas estos valores directamente en el código ni en el repositorio.
-
 ## Paso 4 — Probarlo
 
-1. Ve a la pestaña **Actions** de tu repositorio.
-2. Selecciona el workflow "Alerta diaria Mercado Público".
-3. Haz clic en **Run workflow** (botón "workflow_dispatch") para probarlo
-   manualmente sin esperar al cron.
-4. Revisa los logs de la ejecución y tu bandeja de entrada.
-
-## Paso 5 — Listo
-
-A partir de ahí corre solo, de lunes a viernes a las 12:00 UTC
-(~08:00-09:00 hora de Chile continental, según horario de verano). Es
-gratuito: GitHub Actions da 2.000 minutos/mes gratis en repos privados, y
-esta tarea usa unos pocos minutos por ejecución.
+1. Pestaña **Actions** → workflow "Alerta diaria Mercado Público" → **Run
+   workflow**.
+2. Revisa el log: debería mostrar primero la sección de Licitaciones y
+   luego "=== Compra Ágil (Playwright) ===" con el detalle de cada región
+   revisada.
+3. Revisa tu bandeja de entrada (y spam) — el correo trae dos tablas, una
+   por mecanismo.
 
 ## Ajustar los filtros
 
-Todo se ajusta directamente en `alerta_mercadopublico.py`:
+Ahora todo se ajusta en **un solo lugar**: `common.py`.
 
-- `REGIONES_OBJETIVO`: lista de regiones a monitorear (por defecto `maule` y
-  `nuble`, sin tildes).
-- `PALABRAS_CLAVE`: lista de palabras clave (sin tildes, minúsculas). Agrega
-  o quita las que necesites.
-- El cron (`.github/workflows/alerta-diaria.yml`) para cambiar el horario o
-  los días de ejecución.
+- `PALABRAS_CLAVE`: lista de palabras clave (sin tildes, minúsculas).
+- `REGIONES_OBJETIVO`: diccionario `{nombre: código_región}`. Ya trae Maule
+  (7) y Ñuble (16). Si agregas otra región, necesitas su código numérico
+  oficial (lo puedes ver seleccionándola en el buscador de Compra Ágil y
+  mirando el parámetro `region=` en la URL).
+
+El horario y los días de ejecución se ajustan en
+`.github/workflows/alerta-diaria.yml` (cron, en UTC).
+
+## Desactivar temporalmente Compra Ágil
+
+Si el scraper de Compra Ágil empieza a fallar seguido (por un cambio en el
+sitio) y quieres seguir recibiendo solo Licitaciones mientras se arregla,
+agrega un quinto secret:
+
+| Nombre | Valor |
+|---|---|
+| `INCLUIR_COMPRA_AGIL` | `0` |
+
+y pásalo también como variable de entorno en el workflow (`env:` del paso
+"Ejecutar script de alertas"). Con `0` el script se salta por completo el
+paso de Playwright.
 
 ## Cómo funciona por dentro
 
-1. Cada día consulta el listado básico de licitaciones **publicadas** ese
-   día (`GET licitaciones.json?fecha=...&estado=publicada`).
-2. Para cada una, pide el **detalle completo** (región del comprador,
-   descripción, ítems solicitados).
-3. Se queda solo con las que son de Maule/Ñuble **y** mencionan alguna de
-   tus palabras clave (en el título, la descripción o los ítems).
-4. Arma una tabla HTML con los resultados y la envía por correo.
+**Licitaciones:**
+1. Consulta el listado básico de licitaciones **publicadas** ese día.
+2. Para cada una, pide el **detalle completo** (región, descripción, ítems).
+3. Filtra por región + palabra clave (título, descripción o ítems).
+
+**Compra Ágil:**
+1. Abre un Chromium headless con Playwright.
+2. Para cada región objetivo, navega
+   `buscador.mercadopublico.cl/compra-agil` filtrando por esa región y la
+   fecha de hoy, paginando resultados.
+3. Extrae cada tarjeta de resultado (código, nombre, organismo,
+   presupuesto, fecha de cierre) leyendo el texto visible de la página.
+4. Filtra por palabra clave en el nombre del proceso.
+
+Ambos resultados se combinan en un único correo HTML.

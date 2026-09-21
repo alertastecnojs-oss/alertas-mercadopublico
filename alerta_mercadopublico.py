@@ -1,34 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Alerta diaria de licitaciones de Mercado Público (Chile)
-=========================================================
+Alerta diaria de Mercado Público (Chile) — Licitaciones + Compra Ágil
+=======================================================================
 
-Consulta la API pública de Mercado Público (api.mercadopublico.cl), filtra
-las licitaciones publicadas el día de ejecución por:
-  - Región del comprador (Maule y/o Ñuble)
-  - Palabras clave (en el título, la descripción, o los ítems solicitados)
+1. Licitaciones: consulta la API pública de Mercado Público
+   (api.mercadopublico.cl), filtra las publicadas el día de ejecución por
+   región del comprador y palabras clave, usando el detalle completo de
+   cada una (más preciso).
 
-y envía un correo con el resumen.
+2. Compra Ágil: NO tiene API pública, así que se obtiene con un navegador
+   real (Playwright) contra el buscador público
+   https://buscador.mercadopublico.cl/compra-agil — ver alerta_compra_agil.py
+   para el detalle y las limitaciones de este método.
 
-Nota importante: la API pública de Mercado Público NO expone "Compra Ágil"
-(solo Licitaciones, Trato Directo y Convenio Marco). Para Compra Ágil hay
-que seguir revisando el Escritorio de Proveedor con los rubros inscritos.
+Ambos resultados se combinan en un solo correo.
 
 Configuración: todo se lee desde variables de entorno (ver README.md /
 el workflow de GitHub Actions), nunca se hardcodean credenciales aquí.
+Las palabras clave y regiones se editan en common.py (compartido por
+ambos scripts).
 """
 
 import os
 import sys
 import time
 import smtplib
-import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import requests
+
+from common import contiene_palabra_clave, region_coincide
 
 # ---------------------------------------------------------------------------
 # Configuración (desde variables de entorno)
@@ -42,15 +46,9 @@ EMAIL_TO = os.environ["EMAIL_TO"]               # destinatario(s), separados por
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 
-# Regiones a monitorear (coincidencia flexible, sin tildes, en minúsculas)
-REGIONES_OBJETIVO = ["maule", "nuble"]
-
-# Palabras clave a buscar (sin tildes, en minúsculas)
-PALABRAS_CLAVE = [
-    "camara", "camaras", "vigilancia", "enlace", "enlaces",
-    "anpr", "cctv", "televigilancia", "red", "redes",
-    "telecomunicacion", "telecomunicaciones",
-]
+# Si CORREO_INCLUYE_COMPRA_AGIL=0, se omite el paso de Playwright (por si
+# falla o se quiere desactivar temporalmente sin tocar el workflow).
+INCLUIR_COMPRA_AGIL = os.environ.get("INCLUIR_COMPRA_AGIL", "1") != "0"
 
 API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 TIMEOUT = 20
@@ -58,21 +56,6 @@ PAUSA_ENTRE_LLAMADAS = 0.15  # segundos, para no saturar la API
 
 # URL pública para ver el detalle de una licitación en el portal
 URL_DETALLE = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion={codigo}"
-
-
-def normalizar(texto):
-    """Minúsculas y sin tildes/ñ, para comparar de forma flexible."""
-    if not texto:
-        return ""
-    texto = texto.lower()
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = "".join(c for c in texto if not unicodedata.combining(c))
-    return texto
-
-
-def contiene_palabra_clave(*textos):
-    combinado = normalizar(" ".join(t for t in textos if t))
-    return any(palabra in combinado for palabra in PALABRAS_CLAVE)
 
 
 def obtener_licitaciones_del_dia(fecha_ddmmaaaa):
@@ -92,11 +75,6 @@ def obtener_detalle(codigo):
     data = resp.json()
     listado = data.get("Listado", []) or []
     return listado[0] if listado else None
-
-
-def region_coincide(region_texto):
-    region_norm = normalizar(region_texto)
-    return any(r in region_norm for r in REGIONES_OBJETIVO)
 
 
 def evaluar_licitacion(detalle):
@@ -132,16 +110,55 @@ def evaluar_licitacion(detalle):
     }
 
 
-def construir_cuerpo_html(resultados, fecha_legible):
-    if not resultados:
-        return (
-            f"<p>No se encontraron licitaciones nuevas del {fecha_legible} que coincidan "
-            f"con tus rubros/palabras clave en la Región del Maule o Ñuble.</p>"
-        )
+def obtener_licitaciones(fecha_ddmmaaaa):
+    listado_basico = obtener_licitaciones_del_dia(fecha_ddmmaaaa)
+    print(f"{len(listado_basico)} licitaciones publicadas hoy. Revisando detalle de cada una...")
 
-    filas = ""
-    for r in resultados:
-        filas += f"""
+    resultados = []
+    for item in listado_basico:
+        codigo = item.get("CodigoExterno")
+        if not codigo:
+            continue
+        try:
+            detalle = obtener_detalle(codigo)
+        except requests.RequestException as e:
+            print(f"  aviso: no se pudo obtener detalle de {codigo}: {e}", file=sys.stderr)
+            time.sleep(PAUSA_ENTRE_LLAMADAS)
+            continue
+
+        if detalle:
+            match = evaluar_licitacion(detalle)
+            if match:
+                resultados.append(match)
+                print(f"  MATCH licitación: {codigo} - {match['nombre'][:60]}")
+
+        time.sleep(PAUSA_ENTRE_LLAMADAS)
+
+    return resultados
+
+
+def obtener_compra_agil_seguro():
+    """Intenta obtener Compra Ágil vía Playwright; si algo falla (el sitio
+    cambió, quedó bloqueado, etc.) no debe tumbar todo el envío de correo —
+    solo se registra el error y se sigue sin esa sección."""
+    if not INCLUIR_COMPRA_AGIL:
+        print("Compra Ágil desactivada (INCLUIR_COMPRA_AGIL=0).")
+        return [], None
+
+    try:
+        from alerta_compra_agil import obtener_compra_agil
+        return obtener_compra_agil(), None
+    except Exception as e:
+        mensaje = f"No se pudo obtener Compra Ágil hoy (el scraper falló): {e}"
+        print(f"AVISO: {mensaje}", file=sys.stderr)
+        return [], mensaje
+
+
+def _tabla_licitaciones(resultados):
+    if not resultados:
+        return "<p>Sin coincidencias de Licitaciones hoy.</p>"
+    filas = "".join(
+        f"""
         <tr>
           <td style="padding:8px;border:1px solid #ddd;"><a href="{r['url']}">{r['codigo']}</a></td>
           <td style="padding:8px;border:1px solid #ddd;">{r['nombre']}</td>
@@ -149,11 +166,9 @@ def construir_cuerpo_html(resultados, fecha_legible):
           <td style="padding:8px;border:1px solid #ddd;">{r['comuna']} ({r['region']})</td>
           <td style="padding:8px;border:1px solid #ddd;">{r['fecha_cierre']}</td>
         </tr>"""
-
+        for r in resultados
+    )
     return f"""
-    <html><body style="font-family:Arial,sans-serif;">
-      <h2>Licitaciones nuevas — {fecha_legible}</h2>
-      <p>{len(resultados)} coincidencia(s) en Región del Maule / Ñuble:</p>
       <table style="border-collapse:collapse;width:100%;">
         <tr style="background:#f2f2f2;">
           <th style="padding:8px;border:1px solid #ddd;text-align:left;">Código</th>
@@ -164,9 +179,64 @@ def construir_cuerpo_html(resultados, fecha_legible):
         </tr>
         {filas}
       </table>
+    """
+
+
+def _tabla_compra_agil(resultados):
+    if not resultados:
+        return "<p>Sin coincidencias de Compra Ágil hoy.</p>"
+    filas = "".join(
+        f"""
+        <tr>
+          <td style="padding:8px;border:1px solid #ddd;"><a href="{r['url']}">{r['codigo'] or '-'}</a></td>
+          <td style="padding:8px;border:1px solid #ddd;">{r['nombre']}</td>
+          <td style="padding:8px;border:1px solid #ddd;">{r['organismo']}</td>
+          <td style="padding:8px;border:1px solid #ddd;">{r['region']}</td>
+          <td style="padding:8px;border:1px solid #ddd;">{r['presupuesto']}</td>
+          <td style="padding:8px;border:1px solid #ddd;">{r['fecha_cierre']}</td>
+        </tr>"""
+        for r in resultados
+    )
+    return f"""
+      <table style="border-collapse:collapse;width:100%;">
+        <tr style="background:#f2f2f2;">
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Código</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Nombre</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Organismo</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Región</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Presupuesto</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Cierre</th>
+        </tr>
+        {filas}
+      </table>
+    """
+
+
+def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil):
+    aviso_agil = ""
+    if error_compra_agil:
+        aviso_agil = f"""
+        <p style="background:#fff3cd;border:1px solid #ffe69c;padding:10px;border-radius:4px;">
+          ⚠️ {error_compra_agil}. Revisa manualmente en
+          <a href="https://buscador.mercadopublico.cl/compra-agil">buscador.mercadopublico.cl/compra-agil</a>.
+        </p>
+        """
+
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;">
+      <h2>Alertas Mercado Público — {fecha_legible}</h2>
+
+      <h3>Licitaciones ({len(licitaciones)})</h3>
+      {_tabla_licitaciones(licitaciones)}
+
+      <h3 style="margin-top:24px;">Compra Ágil ({len(compra_agil)})</h3>
+      {aviso_agil}
+      {_tabla_compra_agil(compra_agil)}
+
       <p style="color:#777;font-size:12px;margin-top:16px;">
-        Recuerda: Compra Ágil no está disponible vía API — revisa tus rubros inscritos
-        en el Escritorio de Proveedor de Mercado Público para esas oportunidades.
+        Licitaciones: datos oficiales vía api.mercadopublico.cl.<br>
+        Compra Ágil: extraído del buscador público (no hay API oficial para
+        este mecanismo) — si algo se ve raro, verifica directo en el sitio.
       </p>
     </body></html>
     """
@@ -194,37 +264,19 @@ def main():
     fecha_api = hoy_utc.strftime("%d%m%Y")
     fecha_legible = hoy_utc.strftime("%d-%m-%Y")
 
-    print(f"Consultando licitaciones publicadas el {fecha_api}...")
+    print(f"=== Licitaciones ({fecha_api}) ===")
     try:
-        listado_basico = obtener_licitaciones_del_dia(fecha_api)
+        licitaciones = obtener_licitaciones(fecha_api)
     except requests.RequestException as e:
-        print(f"Error consultando el listado diario: {e}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Error consultando licitaciones: {e}", file=sys.stderr)
+        licitaciones = []
 
-    print(f"{len(listado_basico)} licitaciones publicadas hoy. Revisando detalle de cada una...")
+    print("=== Compra Ágil (Playwright) ===")
+    compra_agil, error_compra_agil = obtener_compra_agil_seguro()
 
-    resultados = []
-    for item in listado_basico:
-        codigo = item.get("CodigoExterno")
-        if not codigo:
-            continue
-        try:
-            detalle = obtener_detalle(codigo)
-        except requests.RequestException as e:
-            print(f"  aviso: no se pudo obtener detalle de {codigo}: {e}", file=sys.stderr)
-            time.sleep(PAUSA_ENTRE_LLAMADAS)
-            continue
-
-        if detalle:
-            match = evaluar_licitacion(detalle)
-            if match:
-                resultados.append(match)
-                print(f"  MATCH: {codigo} - {match['nombre'][:60]}")
-
-        time.sleep(PAUSA_ENTRE_LLAMADAS)
-
-    asunto = f"Alertas Mercado Público — {fecha_legible} ({len(resultados)} coincidencias)"
-    cuerpo = construir_cuerpo_html(resultados, fecha_legible)
+    total = len(licitaciones) + len(compra_agil)
+    asunto = f"Alertas Mercado Público — {fecha_legible} ({total} coincidencias)"
+    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil)
 
     print("Enviando correo...")
     enviar_correo(asunto, cuerpo)
