@@ -50,7 +50,7 @@ INCLUIR_COMPRA_AGIL = os.environ.get("INCLUIR_COMPRA_AGIL", "1") != "0"
 
 API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 TIMEOUT = 20
-PAUSA_ENTRE_LLAMADAS = 3.5  # segundos, para no saturar la API
+PAUSA_ENTRE_LLAMADAS = 0.8  # segundos, para no saturar la API
 
 # URL pública para ver el detalle de una licitación en el portal
 URL_DETALLE = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion={codigo}"
@@ -256,7 +256,7 @@ def enviar_correo(asunto, cuerpo_html):
     msg["To"] = ", ".join(destinatarios)
     msg.attach(MIMEText(cuerpo_html, "html", "utf-8"))
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
         server.starttls()
         server.login(EMAIL_FROM, EMAIL_APP_PASSWORD)
         server.sendmail(EMAIL_FROM, destinatarios, msg.as_string())
