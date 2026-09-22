@@ -24,7 +24,7 @@ import os
 import sys
 import time
 import smtplib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -50,7 +50,7 @@ INCLUIR_COMPRA_AGIL = os.environ.get("INCLUIR_COMPRA_AGIL", "1") != "0"
 
 API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 TIMEOUT = 20
-PAUSA_ENTRE_LLAMADAS = 0.8  # segundos, para no saturar la API
+PAUSA_ENTRE_LLAMADAS = 0.6  # segundos, para no saturar la API
 
 # URL pública para ver el detalle de una licitación en el portal
 URL_DETALLE = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion={codigo}"
@@ -115,31 +115,38 @@ def evaluar_licitacion(detalle):
     }
 
 
-def obtener_licitaciones(fecha_ddmmaaaa):
-    listado_basico = obtener_licitaciones_del_dia(fecha_ddmmaaaa)
-    print(f"{len(listado_basico)} licitaciones publicadas hoy. Revisando detalle de cada una...")
+def obtener_licitaciones(fechas_ddmmaaaa):
+    """fechas_ddmmaaaa: lista de fechas (típicamente [hoy, ayer]) — se
+    consultan todas y se combinan sin duplicados. Esto evita perder
+    licitaciones publicadas ayer después de la hora en que corrió el
+    script (la API v1 solo permite filtrar por un día exacto, no por
+    rango de horas)."""
+    vistos = {}
 
-    resultados = []
-    for item in listado_basico:
-        codigo = item.get("CodigoExterno")
-        if not codigo:
-            continue
-        try:
-            detalle = obtener_detalle(codigo)
-        except requests.RequestException as e:
-            print(f"  aviso: no se pudo obtener detalle de {codigo}: {e}", file=sys.stderr)
+    for fecha in fechas_ddmmaaaa:
+        listado_basico = obtener_licitaciones_del_dia(fecha)
+        print(f"{len(listado_basico)} licitaciones publicadas el {fecha}. Revisando detalle de cada una...")
+
+        for item in listado_basico:
+            codigo = item.get("CodigoExterno")
+            if not codigo or codigo in vistos:
+                continue
+            try:
+                detalle = obtener_detalle(codigo)
+            except requests.RequestException as e:
+                print(f"  aviso: no se pudo obtener detalle de {codigo}: {e}", file=sys.stderr)
+                time.sleep(PAUSA_ENTRE_LLAMADAS)
+                continue
+
+            if detalle:
+                match = evaluar_licitacion(detalle)
+                if match:
+                    vistos[codigo] = match
+                    print(f"  MATCH licitación: {codigo} - {match['nombre'][:60]}")
+
             time.sleep(PAUSA_ENTRE_LLAMADAS)
-            continue
 
-        if detalle:
-            match = evaluar_licitacion(detalle)
-            if match:
-                resultados.append(match)
-                print(f"  MATCH licitación: {codigo} - {match['nombre'][:60]}")
-
-        time.sleep(PAUSA_ENTRE_LLAMADAS)
-
-    return resultados
+    return list(vistos.values())
 
 
 def obtener_compra_agil_seguro():
@@ -264,15 +271,16 @@ def enviar_correo(asunto, cuerpo_html):
 
 def main():
     # Hora de Chile continental aproximada (UTC-4 / UTC-3 según horario de verano).
-    # Usamos la fecha UTC del día de ejecución; el workflow ya está programado
-    # para correr en horario de mañana en Chile.
+    # Consultamos hoy Y ayer (ver obtener_licitaciones) para no perder
+    # licitaciones publicadas después de la hora en que corrió el script.
     hoy_utc = datetime.now(timezone.utc)
-    fecha_api = hoy_utc.strftime("%d%m%Y")
+    ayer_utc = hoy_utc - timedelta(days=1)
+    fechas_api = [hoy_utc.strftime("%d%m%Y"), ayer_utc.strftime("%d%m%Y")]
     fecha_legible = hoy_utc.strftime("%d-%m-%Y")
 
-    print(f"=== Licitaciones ({fecha_api}) ===")
+    print(f"=== Licitaciones ({' y '.join(fechas_api)}) ===")
     try:
-        licitaciones = obtener_licitaciones(fecha_api)
+        licitaciones = obtener_licitaciones(fechas_api)
     except requests.RequestException as e:
         print(f"Error consultando licitaciones: {e}", file=sys.stderr)
         licitaciones = []

@@ -20,7 +20,7 @@ no está garantizado por la documentación.
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -30,7 +30,7 @@ BASE_URL = "https://api2.mercadopublico.cl"
 TICKET = os.environ.get("MP_TICKET_COMPRA_AGIL") or os.environ.get("MP_TICKET")
 TIMEOUT = 20
 TAMANO_PAGINA = 50  # máximo permitido por la API
-PAUSA_ENTRE_LLAMADAS = 0.2
+PAUSA_ENTRE_LLAMADAS = 0.5
 
 URL_DETALLE = "https://buscador.mercadopublico.cl/compra-agil/detalle/{codigo}"
 
@@ -83,9 +83,10 @@ def obtener_compra_agil():
             "(variable MP_TICKET o MP_TICKET_COMPRA_AGIL)."
         )
 
-    hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    fecha_desde = f"{hoy}T00:00:00Z"
-    fecha_hasta = f"{hoy}T23:59:59Z"
+    ahora = datetime.now(timezone.utc)
+    hace_24h = ahora - timedelta(hours=24)
+    fecha_desde = hace_24h.strftime("%Y-%m-%dT%H:%M:%SZ")
+    fecha_hasta = ahora.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     vistos = {}  # codigo -> dict, para evitar duplicados entre palabras clave
 
