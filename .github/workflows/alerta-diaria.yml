@@ -12,7 +12,7 @@ on:
 jobs:
   alerta:
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # red de seguridad: si algo se cuelga, GitHub lo corta solo
+    timeout-minutes: 25  # red de seguridad: si algo se cuelga, GitHub lo corta solo
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
