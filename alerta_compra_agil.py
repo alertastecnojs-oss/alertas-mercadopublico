@@ -24,13 +24,20 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from common import PALABRAS_CLAVE, REGIONES_OBJETIVO, contiene_palabra_clave
+from common import PALABRAS_CLAVE, PALABRAS_CON_CONTEXTO, REGIONES_OBJETIVO, contiene_palabra_clave
 
 BASE_URL = "https://api2.mercadopublico.cl"
 TICKET = os.environ.get("MP_TICKET_COMPRA_AGIL") or os.environ.get("MP_TICKET")
 TIMEOUT = 20
 TAMANO_PAGINA = 50  # máximo permitido por la API
 PAUSA_ENTRE_LLAMADAS = 0.5
+
+# Términos a buscar en la API: las palabras "seguras" MÁS las palabras que
+# requieren contexto (camara, camaras, red, redes, vigilancia) — si no se
+# buscan estas últimas, la API nunca las devuelve y no hay nada que
+# filtrar localmente después. contiene_palabra_clave() se sigue encargando
+# de exigir el contexto real (ver common.py) sobre lo que la API devuelve.
+TERMINOS_BUSQUEDA = list(dict.fromkeys(PALABRAS_CLAVE + list(PALABRAS_CON_CONTEXTO.keys())))
 
 URL_DETALLE = "https://buscador.mercadopublico.cl/compra-agil/detalle/{codigo}"
 
@@ -90,7 +97,7 @@ def obtener_compra_agil():
 
     vistos = {}  # codigo -> dict, para evitar duplicados entre palabras clave
 
-    for palabra in PALABRAS_CLAVE:
+    for palabra in TERMINOS_BUSQUEDA:
         print(f"Compra Ágil: buscando '{palabra}'...")
         pagina = 1
         while True:
