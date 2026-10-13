@@ -1,0 +1,42 @@
+name: Alertas Mercado Público
+
+on:
+  schedule:
+    # Lunes a sábado (1-6). 13:00 UTC = 10:00 AM en horario de verano de Chile (UTC-3)
+    # y 9:00 AM en horario de invierno (UTC-4).
+    - cron: "0 13 * * 1-6"
+  workflow_dispatch: {}   # permite correrlo manualmente desde la pestaña "Actions"
+
+permissions:
+  contents: write   # necesario para poder guardar el registro de "vistos"
+
+jobs:
+  alertas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Ejecutar script de alertas
+        env:
+          MP_TICKET: ${{ secrets.MP_TICKET }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python alertas_mercadopublico.py
+
+      - name: Guardar registro de licitaciones ya vistas
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add vistos_mercadopublico.json
+          git diff --staged --quiet || git commit -m "Actualiza registro de licitaciones vistas"
+          git push
