@@ -52,6 +52,14 @@ API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json
 TIMEOUT = 20
 PAUSA_ENTRE_LLAMADAS = 0.6  # segundos, para no saturar la API
 
+# Presupuesto de tiempo para revisar el detalle de las licitaciones (se
+# consulta una por una, y son cientos por día en todo el país). Si se
+# supera, se corta, se envía el correo igual con lo encontrado y se avisa
+# que quedó incompleto. Así nunca se pierde el correo por el timeout de
+# 25 min del workflow.
+LIMITE_SEG_LICITACIONES = int(os.environ.get("LIMITE_SEG_LICITACIONES", str(14 * 60)))
+AVISOS_LICITACIONES = []
+
 # URL pública para ver el detalle de una licitación en el portal
 URL_DETALLE = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion={codigo}"
 
@@ -122,6 +130,9 @@ def obtener_licitaciones(fechas_ddmmaaaa):
     script (la API v1 solo permite filtrar por un día exacto, no por
     rango de horas)."""
     vistos = {}
+    revisadas = set()
+    inicio = time.monotonic()
+    AVISOS_LICITACIONES.clear()
 
     for fecha in fechas_ddmmaaaa:
         listado_basico = obtener_licitaciones_del_dia(fecha)
@@ -129,8 +140,16 @@ def obtener_licitaciones(fechas_ddmmaaaa):
 
         for item in listado_basico:
             codigo = item.get("CodigoExterno")
-            if not codigo or codigo in vistos:
+            if not codigo or codigo in vistos or codigo in revisadas:
                 continue
+            if time.monotonic() - inicio > LIMITE_SEG_LICITACIONES:
+                AVISOS_LICITACIONES.append(
+                    f"Licitaciones incompleta: se alcanzó el límite de {LIMITE_SEG_LICITACIONES // 60} min "
+                    f"y se revisaron {len(revisadas)} licitaciones"
+                )
+                print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
+                return list(vistos.values())
+            revisadas.add(codigo)
             try:
                 detalle = obtener_detalle(codigo)
             except requests.RequestException as e:
@@ -228,7 +247,15 @@ def _tabla_compra_agil(resultados):
     """
 
 
-def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil):
+def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil, aviso_licitaciones=None):
+    aviso_lic = ""
+    if aviso_licitaciones:
+        aviso_lic = f"""
+        <p style="background:#fff3cd;border:1px solid #ffe69c;padding:10px;border-radius:4px;">
+          ⚠️ {aviso_licitaciones}. Revisa manualmente en
+          <a href="https://www.mercadopublico.cl">mercadopublico.cl</a>.
+        </p>
+        """
     aviso_agil = ""
     if error_compra_agil:
         aviso_agil = f"""
@@ -243,6 +270,7 @@ def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra
       <h2>Alertas Mercado Público — {fecha_legible}</h2>
 
       <h3>Licitaciones ({len(licitaciones)})</h3>
+      {aviso_lic}
       {_tabla_licitaciones(licitaciones)}
 
       <h3 style="margin-top:24px;">Compra Ágil ({len(compra_agil)})</h3>
@@ -251,8 +279,8 @@ def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra
 
       <p style="color:#777;font-size:12px;margin-top:16px;">
         Licitaciones: datos oficiales vía api.mercadopublico.cl.<br>
-        Compra Ágil: extraído del buscador público (no hay API oficial para
-        este mecanismo) — si algo se ve raro, verifica directo en el sitio.
+        Compra Ágil: datos oficiales vía api2.mercadopublico.cl — si algo se
+        ve raro, verifica directo en el sitio.
       </p>
     </body></html>
     """
@@ -281,19 +309,21 @@ def main():
     fechas_api = [hoy_utc.strftime("%d%m%Y"), ayer_utc.strftime("%d%m%Y")]
     fecha_legible = hoy_utc.strftime("%d-%m-%Y")
 
+    print("=== Compra Ágil (API oficial) ===")
+    compra_agil, error_compra_agil = obtener_compra_agil_seguro()
+
     print(f"=== Licitaciones ({' y '.join(fechas_api)}) ===")
     try:
         licitaciones = obtener_licitaciones(fechas_api)
     except requests.RequestException as e:
         print(f"Error consultando licitaciones: {e}", file=sys.stderr)
         licitaciones = []
-
-    print("=== Compra Ágil (API oficial) ===")
-    compra_agil, error_compra_agil = obtener_compra_agil_seguro()
+        AVISOS_LICITACIONES.append(f"No se pudieron consultar las licitaciones hoy: {e}")
+    aviso_licitaciones = "; ".join(AVISOS_LICITACIONES) or None
 
     total = len(licitaciones) + len(compra_agil)
     asunto = f"Alertas Mercado Público — {fecha_legible} ({total} coincidencias)"
-    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil)
+    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil, aviso_licitaciones)
 
     print("Enviando correo...")
     enviar_correo(asunto, cuerpo)
