@@ -3,10 +3,8 @@ name: Alerta diaria Mercado Público
 on:
   schedule:
     # 12:00 UTC ≈ 08:00-09:00 hora de Chile continental (según horario de verano).
-    # Se ejecuta de lunes a viernes (Mercado Público no publica licitaciones nuevas
-    # relevantes los fines de semana en la práctica, pero puedes cambiar a "*" para
-    # que corra todos los días).
-    - cron: '0 12 * * 1-5'
+    # Se ejecuta de lunes a sábado (1-6).
+    - cron: '0 12 * * 1-6'
   workflow_dispatch: {}  # permite ejecutarlo manualmente desde la pestaña Actions para probar
 
 jobs:
