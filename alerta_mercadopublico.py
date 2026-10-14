@@ -159,8 +159,11 @@ def obtener_compra_agil_seguro():
         return [], None
 
     try:
-        from alerta_compra_agil import obtener_compra_agil
-        return obtener_compra_agil(), None
+        import alerta_compra_agil
+        resultados = alerta_compra_agil.obtener_compra_agil()
+        if alerta_compra_agil.ADVERTENCIAS:
+            return resultados, "Compra Ágil incompleta hoy: " + "; ".join(alerta_compra_agil.ADVERTENCIAS)
+        return resultados, None
     except Exception as e:
         mensaje = f"No se pudo obtener Compra Ágil hoy (el scraper falló): {e}"
         print(f"AVISO: {mensaje}", file=sys.stderr)

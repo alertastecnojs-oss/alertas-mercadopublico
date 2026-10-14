@@ -41,6 +41,15 @@ TERMINOS_BUSQUEDA = list(dict.fromkeys(PALABRAS_CLAVE + list(PALABRAS_CON_CONTEX
 
 URL_DETALLE = "https://buscador.mercadopublico.cl/compra-agil/detalle/{codigo}"
 
+# Avisos de esta corrida (ej. cuota agotada). alerta_mercadopublico.py los
+# lee y los muestra en el correo, para que un resultado vacío por error
+# no se confunda con "hoy no hubo nada".
+ADVERTENCIAS = []
+
+
+class CuotaAgotada(Exception):
+    """La API respondió 429: se agotó la cuota diaria del ticket."""
+
 # Códigos de región de la API (1 a 16) para las regiones configuradas en
 # common.py — coinciden con los mismos códigos usados en todo Mercado
 # Público (7 = Maule, 16 = Ñuble).
@@ -67,7 +76,7 @@ def _buscar_pagina(keyword, fecha_desde, fecha_hasta, numero_pagina):
     )
     if resp.status_code == 429:
         print("  aviso: cuota diaria de la API de Compra Ágil agotada (429).", file=sys.stderr)
-        return [], 1, 1
+        raise CuotaAgotada()
     resp.raise_for_status()
     data = resp.json()
     if data.get("success") != "OK":
@@ -91,8 +100,12 @@ def obtener_compra_agil():
         )
 
     ahora = datetime.now(timezone.utc)
-    hace_24h = ahora - timedelta(hours=24)
-    fecha_desde = hace_24h.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ADVERTENCIAS.clear()
+    # El workflow corre de lunes a sábado. El lunes miramos 48 h hacia atrás
+    # para no perder lo publicado entre el sábado y el domingo.
+    horas_atras = 48 if ahora.weekday() == 0 else 24
+    hace_n_horas = ahora - timedelta(hours=horas_atras)
+    fecha_desde = hace_n_horas.strftime("%Y-%m-%dT%H:%M:%SZ")
     fecha_hasta = ahora.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     vistos = {}  # codigo -> dict, para evitar duplicados entre palabras clave
@@ -101,7 +114,14 @@ def obtener_compra_agil():
         print(f"Compra Ágil: buscando '{palabra}'...")
         pagina = 1
         while True:
-            items, pagina_actual, total_paginas = _buscar_pagina(palabra, fecha_desde, fecha_hasta, pagina)
+            try:
+                items, pagina_actual, total_paginas = _buscar_pagina(palabra, fecha_desde, fecha_hasta, pagina)
+            except CuotaAgotada:
+                ADVERTENCIAS.append(
+                    "Se agotó la cuota diaria de la API de Compra Ágil (HTTP 429): "
+                    f"la búsqueda quedó incompleta (se alcanzó a revisar hasta '{palabra}')"
+                )
+                return list(vistos.values())
             for item in items:
                 codigo = item.get("codigo")
                 if not codigo or codigo in vistos:
