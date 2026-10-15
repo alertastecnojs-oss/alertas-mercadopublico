@@ -10,7 +10,7 @@ on:
 jobs:
   alerta:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # red de seguridad: si algo se cuelga, GitHub lo corta solo
+    timeout-minutes: 30  # red de seguridad: si algo se cuelga, GitHub lo corta solo
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
@@ -23,10 +23,30 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      - name: Restaurar memoria de la última ejecución
+        # Recupera el registro de licitaciones ya revisadas y avisos ya enviados.
+        # Si no existe (primera vez o caché vencida), se parte de cero sin problema.
+        uses: actions/cache/restore@v4
+        with:
+          path: vistos_mercadopublico.json
+          key: vistos-${{ github.run_id }}
+          restore-keys: |
+            vistos-
+
       - name: Ejecutar script de alertas
         env:
           MP_TICKET: ${{ secrets.MP_TICKET }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          # Tiempo máximo (segundos) para revisar el detalle de las licitaciones.
+          # Si se supera, se envía el correo igual con lo encontrado y un aviso.
+          LIMITE_SEG_LICITACIONES: "1200"
         run: python alerta_mercadopublico.py
+
+      - name: Guardar memoria para la próxima ejecución
+        if: always()  # también si el script falló o se pasó de tiempo
+        uses: actions/cache/save@v4
+        with:
+          path: vistos_mercadopublico.json
+          key: vistos-${{ github.run_id }}
