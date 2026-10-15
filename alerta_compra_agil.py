@@ -20,11 +20,12 @@ no está garantizado por la documentación.
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 
-from common import PALABRAS_CLAVE, PALABRAS_CON_CONTEXTO, REGIONES_OBJETIVO, contiene_palabra_clave
+from common import PALABRAS_CLAVE, PALABRAS_CON_CONTEXTO, REGIONES_OBJETIVO, contiene_palabra_clave_titulo
 
 BASE_URL = "https://api2.mercadopublico.cl"
 TICKET = os.environ.get("MP_TICKET_COMPRA_AGIL") or os.environ.get("MP_TICKET")
@@ -45,6 +46,10 @@ URL_DETALLE = "https://buscador.mercadopublico.cl/compra-agil/detalle/{codigo}"
 # lee y los muestra en el correo, para que un resultado vacío por error
 # no se confunda con "hoy no hubo nada".
 ADVERTENCIAS = []
+# Diagnóstico de la corrida, para el correo: cuántas Compras Ágiles devolvió
+# la API y cuáles descartó el filtro de palabras (common.py).
+RESUMEN = ""
+DESCARTADAS = []
 
 
 class CuotaAgotada(Exception):
@@ -99,16 +104,37 @@ def obtener_compra_agil():
             "(variable MP_TICKET o MP_TICKET_COMPRA_AGIL)."
         )
 
-    ahora = datetime.now(timezone.utc)
+    # OJO: la API expresa TODAS sus fechas en hora de Chile, aunque las marque
+    # con "Z" (ej. una compra publicada a las 19:26 hora de Chile aparece con
+    # fecha_ultimo_cambio "...T19:30:00Z"). Por eso la ventana se calcula con
+    # el reloj de Chile y se envía con esa misma convención; con UTC real la
+    # ventana quedaba corrida 3 horas y se perdía lo publicado entre las
+    # 09:00 y las 12:00 de cada día.
+    ahora = datetime.now(ZoneInfo("America/Santiago"))
     ADVERTENCIAS.clear()
-    # El workflow corre de lunes a sábado. El lunes miramos 48 h hacia atrás
-    # para no perder lo publicado entre el sábado y el domingo.
-    horas_atras = 48 if ahora.weekday() == 0 else 24
-    hace_n_horas = ahora - timedelta(hours=horas_atras)
-    fecha_desde = hace_n_horas.strftime("%Y-%m-%dT%H:%M:%SZ")
+    DESCARTADAS.clear()
+    global RESUMEN
+    RESUMEN = ""
+    # Corre de lunes a sábado: el lunes se mira más atrás para cubrir el
+    # domingo. Se suman 2 h de margen para que un workflow atrasado por
+    # GitHub no deje huecos entre una corrida y la siguiente.
+    horas_atras = 50 if ahora.weekday() == 0 else 26
+    fecha_desde = (ahora - timedelta(hours=horas_atras)).strftime("%Y-%m-%dT%H:%M:%SZ")
     fecha_hasta = ahora.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     vistos = {}  # codigo -> dict, para evitar duplicados entre palabras clave
+    devueltas_api = set()  # todo lo que la API devolvió, pase o no el filtro
+    descartadas = {}  # codigo -> nombre, lo que el filtro de palabras dejó fuera
+
+    def _cerrar():
+        global RESUMEN
+        DESCARTADAS.extend(descartadas.values())
+        RESUMEN = (
+            f"La API devolvió {len(devueltas_api)} Compra(s) Ágil(es) publicadas en las últimas "
+            f"{horas_atras} h en Maule/Ñuble para tus términos de búsqueda; "
+            f"{len(vistos)} pasaron el filtro de palabras."
+        )
+        print(RESUMEN)
 
     for palabra in TERMINOS_BUSQUEDA:
         print(f"Compra Ágil: buscando '{palabra}'...")
@@ -121,16 +147,23 @@ def obtener_compra_agil():
                     "Se agotó la cuota diaria de la API de Compra Ágil (HTTP 429): "
                     f"la búsqueda quedó incompleta (se alcanzó a revisar hasta '{palabra}')"
                 )
+                _cerrar()
                 return list(vistos.values())
+            print(f"  '{palabra}' pág. {pagina}: {len(items)} resultado(s) de la API")
             for item in items:
                 codigo = item.get("codigo")
-                if not codigo or codigo in vistos:
+                if not codigo:
+                    continue
+                devueltas_api.add(codigo)
+                if codigo in vistos:
                     continue
                 nombre = item.get("nombre", "") or ""
                 # El endpoint de listado ya filtró por 'q', pero igual
                 # verificamos localmente por si el match del buscador
                 # es más amplio de lo esperado (ej. coincide en otro campo).
-                if not contiene_palabra_clave(nombre):
+                if not contiene_palabra_clave_titulo(nombre):
+                    descartadas[codigo] = nombre
+                    print(f"  descartada por filtro: {codigo} - {nombre[:70]}")
                     continue
 
                 institucion = item.get("institucion") or {}
@@ -159,6 +192,7 @@ def obtener_compra_agil():
 
         time.sleep(PAUSA_ENTRE_LLAMADAS)
 
+    _cerrar()
     return list(vistos.values())
 
 

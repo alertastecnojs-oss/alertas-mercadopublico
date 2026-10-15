@@ -19,6 +19,7 @@ PALABRAS_CLAVE = [
     "enlace", "enlaces",
     "anpr", "cctv", "televigilancia",
     "telecomunicacion", "telecomunicaciones",
+    "videovigilancia", "videocamara", "videocamaras",
 ]
 
 # Palabras demasiado genéricas en el lenguaje de compras públicas chilenas
@@ -32,8 +33,8 @@ PALABRAS_CLAVE = [
 VENTANA_PALABRAS = 6
 
 PALABRAS_CON_CONTEXTO = {
-    "camara": ["seguridad", "vigilancia", "ip", "cctv", "video"],
-    "camaras": ["seguridad", "vigilancia", "ip", "cctv", "video"],
+    "camara": ["seguridad", "vigilancia", "ip", "cctv", "video", "circuito", "cerrado", "tv", "television", "monitoreo", "grabacion", "nvr", "dvr", "ptz", "domo"],
+    "camaras": ["seguridad", "vigilancia", "ip", "cctv", "video", "circuito", "cerrado", "tv", "television", "monitoreo", "grabacion", "nvr", "dvr", "ptz", "domo"],
     "red": [
         "inalambrica", "wifi", "telecomunicacion", "telecomunicaciones",
         "fibra", "radioenlace", "microondas",
@@ -54,6 +55,7 @@ PALABRAS_CON_CONTEXTO = {
 # como contexto libre, pero la frase completa sí es inequívoca.
 FRASES_INCLUIDAS = [
     "red de datos", "redes de datos", "cableado estructurado",
+    "circuito cerrado",
 ]
 
 # Frases que, si aparecen, DESCARTAN el resultado aunque haya matcheado
@@ -118,3 +120,35 @@ def contiene_palabra_clave(*textos):
 def region_coincide(region_texto):
     region_norm = normalizar(region_texto or "")
     return any(r in region_norm for r in REGIONES_OBJETIVO)
+
+
+# --- Solo para títulos cortos (Compra Ágil) -------------------------------
+# En Compra Ágil el nombre es lo único que se ve en el listado y suele ser
+# una frase corta ("MANTENCION DE CAMARAS", "CAMARAS CIRCUITO CERRADO PARA
+# ..."), sin palabras de contexto. Por eso, ahí "camara(s)" cuenta por sí
+# sola, salvo en los usos que no tienen que ver con seguridad. Pon
+# CAMARAS_SOLAS = False para volver a exigir contexto también en Compra Ágil.
+CAMARAS_SOLAS = True
+FRASES_EXCLUIDAS_CAMARA = [
+    "camara de comercio", "camara chilena", "camara frigorifica",
+    "camara de frio", "camaras de frio", "camara de refrigeracion",
+    "camara fotografica", "camara de aire", "camaras de aire",
+    "camara de cultivo", "camara de diputados", "camara de senadores",
+    "camara hiperbarica", "camara de bronceado",
+]
+
+
+def contiene_palabra_clave_titulo(titulo):
+    """Igual que contiene_palabra_clave, pero para títulos cortos de Compra
+    Ágil: acepta 'camara/camaras' sin contexto (salvo usos no relacionados)."""
+    if contiene_palabra_clave(titulo):
+        return True
+    if not CAMARAS_SOLAS:
+        return False
+    combinado = normalizar(titulo)
+    if any(frase in combinado for frase in FRASES_EXCLUIDAS):
+        return False
+    tokens = set(_tokenizar(combinado))
+    if tokens & {"camara", "camaras"}:
+        return not any(frase in combinado for frase in FRASES_EXCLUIDAS_CAMARA)
+    return False

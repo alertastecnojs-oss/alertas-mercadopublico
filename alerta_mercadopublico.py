@@ -247,7 +247,16 @@ def _tabla_compra_agil(resultados):
     """
 
 
-def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil, aviso_licitaciones=None):
+def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil,
+                          resumen_agil="", descartadas_agil=(), aviso_licitaciones=None):
+    diagnostico_agil = ""
+    if resumen_agil:
+        descartes = ""
+        if descartadas_agil:
+            lista = "; ".join(n[:70] for n in list(descartadas_agil)[:10])
+            extra = f" (y {len(descartadas_agil) - 10} más)" if len(descartadas_agil) > 10 else ""
+            descartes = f"<br>Descartadas por el filtro de palabras: {lista}{extra}."
+        diagnostico_agil = f'<p style="color:#777;font-size:12px;">{resumen_agil}{descartes}</p>'
     aviso_lic = ""
     if aviso_licitaciones:
         aviso_lic = f"""
@@ -276,6 +285,7 @@ def construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra
       <h3 style="margin-top:24px;">Compra Ágil ({len(compra_agil)})</h3>
       {aviso_agil}
       {_tabla_compra_agil(compra_agil)}
+      {diagnostico_agil}
 
       <p style="color:#777;font-size:12px;margin-top:16px;">
         Licitaciones: datos oficiales vía api.mercadopublico.cl.<br>
@@ -323,7 +333,12 @@ def main():
 
     total = len(licitaciones) + len(compra_agil)
     asunto = f"Alertas Mercado Público — {fecha_legible} ({total} coincidencias)"
-    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil, aviso_licitaciones)
+    try:
+        import alerta_compra_agil as _ca
+        resumen_agil, descartadas_agil = _ca.RESUMEN, list(_ca.DESCARTADAS)
+    except Exception:
+        resumen_agil, descartadas_agil = "", []
+    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil, resumen_agil, descartadas_agil, aviso_licitaciones)
 
     print("Enviando correo...")
     enviar_correo(asunto, cuerpo)
