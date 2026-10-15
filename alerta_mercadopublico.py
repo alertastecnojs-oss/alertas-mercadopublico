@@ -31,6 +31,7 @@ from email.mime.text import MIMEText
 import requests
 
 from common import contiene_palabra_clave, region_coincide
+import estado as memoria
 
 # ---------------------------------------------------------------------------
 # Configuración (desde variables de entorno)
@@ -123,33 +124,45 @@ def evaluar_licitacion(detalle):
     }
 
 
-def obtener_licitaciones(fechas_ddmmaaaa):
+def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
     """fechas_ddmmaaaa: lista de fechas (típicamente [hoy, ayer]) — se
     consultan todas y se combinan sin duplicados. Esto evita perder
     licitaciones publicadas ayer después de la hora en que corrió el
     script (la API v1 solo permite filtrar por un día exacto, no por
-    rango de horas)."""
-    vistos = {}
-    revisadas = set()
+    rango de horas).
+
+    registro: la memoria entre ejecuciones (estado.py). Si se entrega, las
+    licitaciones cuyo detalle ya se revisó antes se saltan sin consultar la
+    API, y las que se revisan ahora quedan anotadas. Si se agota el tiempo,
+    las que faltan NO se anotan, así que se revisan en la próxima ejecución."""
+    previas = (registro or {}).get("revisadas", {})
+    resultados = {}
+    en_corrida = set()
+    saltadas = 0
+    revisadas_ahora = 0
     inicio = time.monotonic()
     AVISOS_LICITACIONES.clear()
 
     for fecha in fechas_ddmmaaaa:
         listado_basico = obtener_licitaciones_del_dia(fecha)
-        print(f"{len(listado_basico)} licitaciones publicadas el {fecha}. Revisando detalle de cada una...")
+        print(f"{len(listado_basico)} licitaciones publicadas el {fecha}.")
 
         for item in listado_basico:
             codigo = item.get("CodigoExterno")
-            if not codigo or codigo in vistos or codigo in revisadas:
+            if not codigo or codigo in en_corrida:
+                continue
+            en_corrida.add(codigo)
+            if codigo in previas:
+                saltadas += 1
                 continue
             if time.monotonic() - inicio > LIMITE_SEG_LICITACIONES:
                 AVISOS_LICITACIONES.append(
                     f"Licitaciones incompleta: se alcanzó el límite de {LIMITE_SEG_LICITACIONES // 60} min "
-                    f"y se revisaron {len(revisadas)} licitaciones"
+                    f"(se revisaron {revisadas_ahora} nuevas; el resto se revisará en la próxima ejecución)"
                 )
                 print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
-                return list(vistos.values())
-            revisadas.add(codigo)
+                print(f"  {saltadas} ya revisadas antes (omitidas), {revisadas_ahora} revisadas ahora.")
+                return list(resultados.values())
             try:
                 detalle = obtener_detalle(codigo)
             except requests.RequestException as e:
@@ -158,14 +171,18 @@ def obtener_licitaciones(fechas_ddmmaaaa):
                 continue
 
             if detalle:
+                revisadas_ahora += 1
+                if registro is not None:
+                    registro["revisadas"][codigo] = memoria.hoy()
                 match = evaluar_licitacion(detalle)
                 if match:
-                    vistos[codigo] = match
+                    resultados[codigo] = match
                     print(f"  MATCH licitación: {codigo} - {match['nombre'][:60]}")
 
             time.sleep(PAUSA_ENTRE_LLAMADAS)
 
-    return list(vistos.values())
+    print(f"  {saltadas} ya revisadas antes (omitidas), {revisadas_ahora} revisadas ahora.")
+    return list(resultados.values())
 
 
 def obtener_compra_agil_seguro():
@@ -319,29 +336,45 @@ def main():
     fechas_api = [hoy_utc.strftime("%d%m%Y"), ayer_utc.strftime("%d%m%Y")]
     fecha_legible = hoy_utc.strftime("%d-%m-%Y")
 
+    registro = memoria.cargar()
+    print(f"Memoria: {len(registro['revisadas'])} licitaciones revisadas y "
+          f"{len(registro['notificadas'])} avisos anteriores.")
+
     print("=== Compra Ágil (API oficial) ===")
     compra_agil, error_compra_agil = obtener_compra_agil_seguro()
+    # Solo las que no se avisaron antes
+    compra_agil_nueva = [c for c in compra_agil if c["codigo"] not in registro["notificadas"]]
+    ya_avisadas = len(compra_agil) - len(compra_agil_nueva)
 
     print(f"=== Licitaciones ({' y '.join(fechas_api)}) ===")
     try:
-        licitaciones = obtener_licitaciones(fechas_api)
+        licitaciones = obtener_licitaciones(fechas_api, registro)
     except requests.RequestException as e:
         print(f"Error consultando licitaciones: {e}", file=sys.stderr)
         licitaciones = []
         AVISOS_LICITACIONES.append(f"No se pudieron consultar las licitaciones hoy: {e}")
+    licitaciones = [l for l in licitaciones if l["codigo"] not in registro["notificadas"]]
     aviso_licitaciones = "; ".join(AVISOS_LICITACIONES) or None
 
-    total = len(licitaciones) + len(compra_agil)
+    total = len(licitaciones) + len(compra_agil_nueva)
     asunto = f"Alertas Mercado Público — {fecha_legible} ({total} coincidencias)"
     try:
         import alerta_compra_agil as _ca
         resumen_agil, descartadas_agil = _ca.RESUMEN, list(_ca.DESCARTADAS)
     except Exception:
         resumen_agil, descartadas_agil = "", []
-    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil, error_compra_agil, resumen_agil, descartadas_agil, aviso_licitaciones)
+    if resumen_agil and ya_avisadas:
+        resumen_agil += f" {ya_avisadas} ya se habían avisado antes."
+    cuerpo = construir_cuerpo_html(fecha_legible, licitaciones, compra_agil_nueva, error_compra_agil, resumen_agil, descartadas_agil, aviso_licitaciones)
 
     print("Enviando correo...")
     enviar_correo(asunto, cuerpo)
+
+    # La memoria se guarda DESPUÉS de enviar: si el correo falla, la próxima
+    # ejecución vuelve a intentarlo con todo lo pendiente.
+    for item in list(compra_agil_nueva) + list(licitaciones):
+        registro["notificadas"][item["codigo"]] = memoria.hoy()
+    memoria.guardar(registro)
     print("Listo.")
 
 

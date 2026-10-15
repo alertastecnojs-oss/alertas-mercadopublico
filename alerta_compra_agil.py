@@ -20,8 +20,6 @@ no está garantizado por la documentación.
 import os
 import sys
 import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import requests
 
@@ -65,13 +63,11 @@ def _headers():
     return {"ticket": TICKET}
 
 
-def _buscar_pagina(keyword, fecha_desde, fecha_hasta, numero_pagina):
+def _buscar_pagina(keyword, numero_pagina):
     params = {
         "q": keyword,
         "region": _REGIONES_PARAM,
         "estado": "publicada",
-        "publicado_desde": fecha_desde,
-        "publicado_hasta": fecha_hasta,
         "tamano_pagina": TAMANO_PAGINA,
         "numero_pagina": numero_pagina,
         "ordenar_por": "FechaPublicacion",
@@ -96,31 +92,25 @@ def _buscar_pagina(keyword, fecha_desde, fecha_hasta, numero_pagina):
 
 def obtener_compra_agil():
     """Busca, para cada palabra clave configurada, las Compras Ágiles
-    publicadas hoy en las regiones objetivo. Devuelve una lista de dicts
-    sin duplicados (por código)."""
+    abiertas en las regiones objetivo. Devuelve una lista de dicts sin
+    duplicados (por código). Quién ya fue avisado se filtra afuera
+    (alerta_mercadopublico.py, con estado.py)."""
     if not TICKET:
         raise RuntimeError(
             "No hay ticket configurado para la API de Compra Ágil "
             "(variable MP_TICKET o MP_TICKET_COMPRA_AGIL)."
         )
 
-    # OJO: la API expresa TODAS sus fechas en hora de Chile, aunque las marque
-    # con "Z" (ej. una compra publicada a las 19:26 hora de Chile aparece con
-    # fecha_ultimo_cambio "...T19:30:00Z"). Por eso la ventana se calcula con
-    # el reloj de Chile y se envía con esa misma convención; con UTC real la
-    # ventana quedaba corrida 3 horas y se perdía lo publicado entre las
-    # 09:00 y las 12:00 de cada día.
-    ahora = datetime.now(ZoneInfo("America/Santiago"))
+    # Sin ventana de fechas: se piden TODAS las Compras Ágiles abiertas
+    # ("publicada") que coinciden con cada término. Como el programa recuerda
+    # entre ejecuciones cuáles ya avisó (estado.py), no se repiten, y así no
+    # dependemos de la hora, de zonas horarias (la API marca con "Z" fechas
+    # que en realidad están en hora de Chile) ni de que no falle ninguna
+    # ejecución.
     ADVERTENCIAS.clear()
     DESCARTADAS.clear()
     global RESUMEN
     RESUMEN = ""
-    # Corre de lunes a sábado: el lunes se mira más atrás para cubrir el
-    # domingo. Se suman 2 h de margen para que un workflow atrasado por
-    # GitHub no deje huecos entre una corrida y la siguiente.
-    horas_atras = 50 if ahora.weekday() == 0 else 26
-    fecha_desde = (ahora - timedelta(hours=horas_atras)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    fecha_hasta = ahora.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     vistos = {}  # codigo -> dict, para evitar duplicados entre palabras clave
     devueltas_api = set()  # todo lo que la API devolvió, pase o no el filtro
@@ -130,9 +120,8 @@ def obtener_compra_agil():
         global RESUMEN
         DESCARTADAS.extend(descartadas.values())
         RESUMEN = (
-            f"La API devolvió {len(devueltas_api)} Compra(s) Ágil(es) publicadas en las últimas "
-            f"{horas_atras} h en Maule/Ñuble para tus términos de búsqueda; "
-            f"{len(vistos)} pasaron el filtro de palabras."
+            f"La API devolvió {len(devueltas_api)} Compra(s) Ágil(es) abiertas en Maule/Ñuble "
+            f"para tus términos de búsqueda; {len(vistos)} pasaron el filtro de palabras."
         )
         print(RESUMEN)
 
@@ -141,7 +130,7 @@ def obtener_compra_agil():
         pagina = 1
         while True:
             try:
-                items, pagina_actual, total_paginas = _buscar_pagina(palabra, fecha_desde, fecha_hasta, pagina)
+                items, pagina_actual, total_paginas = _buscar_pagina(palabra, pagina)
             except CuotaAgotada:
                 ADVERTENCIAS.append(
                     "Se agotó la cuota diaria de la API de Compra Ágil (HTTP 429): "

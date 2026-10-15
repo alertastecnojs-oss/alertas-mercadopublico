@@ -113,3 +113,18 @@ agrega un aviso y sigue con las Licitaciones.
 Ambos resultados se combinan en un único correo HTML. Si Compra Ágil falla
 por cualquier motivo, el correo se envía igual con un aviso — nunca te
 quedas sin correo por un problema en esa parte.
+
+## Memoria entre ejecuciones
+
+El programa recuerda lo que ya vio, en el archivo `vistos_mercadopublico.json`
+(código en `estado.py`):
+
+- **Licitaciones ya revisadas:** no se vuelve a consultar su detalle, lo que
+  acorta mucho la ejecución (solo se revisan las nuevas).
+- **Avisos ya enviados:** una licitación o Compra Ágil aparece en el correo
+  una sola vez, aunque siga abierta varios días.
+
+En GitHub el archivo se conserva con `actions/cache` (no se sube al
+repositorio). Si la caché expira (GitHub la borra tras 7 días sin uso) o se
+borra a mano, el programa parte de cero: funciona igual, pero esa vez puede
+avisar de cosas que ya habías visto. Se olvidan los códigos tras 60 días.
