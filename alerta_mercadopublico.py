@@ -24,11 +24,12 @@ import os
 import sys
 import time
 import smtplib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import requests
+from zoneinfo import ZoneInfo
 
 from common import contiene_palabra_clave, region_coincide
 import estado as memoria
@@ -52,6 +53,7 @@ INCLUIR_COMPRA_AGIL = os.environ.get("INCLUIR_COMPRA_AGIL", "1") != "0"
 API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 TIMEOUT = 20
 PAUSA_ENTRE_LLAMADAS = 0.6  # segundos, para no saturar la API
+PAUSA_REINTENTO = 5  # segundos (se multiplica por el número de intento)
 
 # Presupuesto de tiempo para revisar el detalle de las licitaciones (se
 # consulta una por una, y son cientos por día en todo el país). Si se
@@ -63,6 +65,17 @@ AVISOS_LICITACIONES = []
 
 # URL pública para ver el detalle de una licitación en el portal
 URL_DETALLE = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion={codigo}"
+
+
+def _sin_ticket(valor):
+    """Texto del error sin el ticket. Los errores de requests incluyen la URL
+    completa (con ?ticket=...), y eso terminaba escrito en el correo y en los
+    logs."""
+    texto = str(valor)
+    for t in {MP_TICKET, os.environ.get("MP_TICKET_COMPRA_AGIL", "")}:
+        if t:
+            texto = texto.replace(t, "***")
+    return texto
 
 
 def _get(params):
@@ -78,8 +91,23 @@ def _get(params):
 def obtener_licitaciones_del_dia(fecha_ddmmaaaa):
     """Trae el listado básico de licitaciones publicadas en la fecha dada."""
     params = {"fecha": fecha_ddmmaaaa, "estado": "publicada", "ticket": MP_TICKET}
-    data = _get(params)
-    return data.get("Listado", []) or []
+    # La API a veces responde 500 o se cae un instante: se reintenta (3 veces
+    # en total). Un error 4xx (ticket, cuota) no se reintenta.
+    ultimo_error = None
+    for intento in range(3):
+        try:
+            data = _get(params)
+            return data.get("Listado", []) or []
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500:
+                raise
+            ultimo_error = e
+        except (requests.ConnectionError, requests.Timeout) as e:
+            ultimo_error = e
+        if intento < 2:
+            print(f"  reintentando el listado del {fecha_ddmmaaaa} ({_sin_ticket(ultimo_error)})", file=sys.stderr)
+            time.sleep(PAUSA_REINTENTO * (intento + 1))
+    raise ultimo_error
 
 
 def obtener_detalle(codigo):
@@ -144,7 +172,13 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
     AVISOS_LICITACIONES.clear()
 
     for fecha in fechas_ddmmaaaa:
-        listado_basico = obtener_licitaciones_del_dia(fecha)
+        try:
+            listado_basico = obtener_licitaciones_del_dia(fecha)
+        except requests.RequestException as e:
+            # Si falla el listado de un día, igual se revisa el otro.
+            AVISOS_LICITACIONES.append(f"No se pudo obtener el listado del {fecha[:2]}-{fecha[2:4]}: {_sin_ticket(e)}")
+            print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
+            continue
         print(f"{len(listado_basico)} licitaciones publicadas el {fecha}.")
 
         for item in listado_basico:
@@ -166,7 +200,7 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
             try:
                 detalle = obtener_detalle(codigo)
             except requests.RequestException as e:
-                print(f"  aviso: no se pudo obtener detalle de {codigo}: {e}", file=sys.stderr)
+                print(f"  aviso: no se pudo obtener detalle de {codigo}: {_sin_ticket(e)}", file=sys.stderr)
                 time.sleep(PAUSA_ENTRE_LLAMADAS)
                 continue
 
@@ -201,7 +235,7 @@ def obtener_compra_agil_seguro():
             return resultados, "Compra Ágil incompleta hoy: " + "; ".join(alerta_compra_agil.ADVERTENCIAS)
         return resultados, None
     except Exception as e:
-        mensaje = f"No se pudo obtener Compra Ágil hoy (el scraper falló): {e}"
+        mensaje = f"No se pudo obtener Compra Ágil hoy (el scraper falló): {_sin_ticket(e)}"
         print(f"AVISO: {mensaje}", file=sys.stderr)
         return [], mensaje
 
@@ -331,10 +365,12 @@ def main():
     # Hora de Chile continental aproximada (UTC-4 / UTC-3 según horario de verano).
     # Consultamos hoy Y ayer (ver obtener_licitaciones) para no perder
     # licitaciones publicadas después de la hora en que corrió el script.
-    hoy_utc = datetime.now(timezone.utc)
-    ayer_utc = hoy_utc - timedelta(days=1)
-    fechas_api = [hoy_utc.strftime("%d%m%Y"), ayer_utc.strftime("%d%m%Y")]
-    fecha_legible = hoy_utc.strftime("%d-%m-%Y")
+    # Fechas según el reloj de Chile (no UTC): pasadas las 21:00 en Chile ya es
+    # "mañana" en UTC, y pedir el listado de un día que aún no existe da error 500.
+    hoy_cl = datetime.now(ZoneInfo("America/Santiago"))
+    ayer_cl = hoy_cl - timedelta(days=1)
+    fechas_api = [hoy_cl.strftime("%d%m%Y"), ayer_cl.strftime("%d%m%Y")]
+    fecha_legible = hoy_cl.strftime("%d-%m-%Y")
 
     registro = memoria.cargar()
     print(f"Memoria: {len(registro['revisadas'])} licitaciones revisadas y "
@@ -350,9 +386,9 @@ def main():
     try:
         licitaciones = obtener_licitaciones(fechas_api, registro)
     except requests.RequestException as e:
-        print(f"Error consultando licitaciones: {e}", file=sys.stderr)
+        print(f"Error consultando licitaciones: {_sin_ticket(e)}", file=sys.stderr)
         licitaciones = []
-        AVISOS_LICITACIONES.append(f"No se pudieron consultar las licitaciones hoy: {e}")
+        AVISOS_LICITACIONES.append(f"No se pudieron consultar las licitaciones hoy: {_sin_ticket(e)}")
     licitaciones = [l for l in licitaciones if l["codigo"] not in registro["notificadas"]]
     aviso_licitaciones = "; ".join(AVISOS_LICITACIONES) or None
 
