@@ -78,12 +78,23 @@ def _sin_ticket(valor):
     return texto
 
 
+class LimiteExcedido(Exception):
+    """La API respondió 429 (Too Many Requests)."""
+
+
+ESPERAS_429_LISTADO = (30, 90, 180)  # segundos entre reintentos del listado
+ESPERA_429_DETALLE = 30
+MAX_429_SEGUIDOS = 3  # tras tantos 429 seguidos en detalle se corta la revisión
+
+
 def _get(params):
     """GET a la API de Licitaciones. Si la API responde 429 (límite de
     tasa) u otro error, se propaga la excepción y quien llama decide qué
     hacer — no hay reintentos: se prefiere saltar esa licitación y seguir
     con las demás antes que alargar la corrida esperando."""
     resp = requests.get(API_BASE, params=params, timeout=TIMEOUT)
+    if resp.status_code == 429:
+        raise LimiteExcedido("HTTP 429 Too Many Requests (límite de uso de la API de Licitaciones)")
     resp.raise_for_status()
     return resp.json()
 
@@ -94,20 +105,33 @@ def obtener_licitaciones_del_dia(fecha_ddmmaaaa):
     # La API a veces responde 500 o se cae un instante: se reintenta (3 veces
     # en total). Un error 4xx (ticket, cuota) no se reintenta.
     ultimo_error = None
-    for intento in range(3):
+    espera_429 = 0
+    fallos_5xx = 0
+    while True:
         try:
             data = _get(params)
             return data.get("Listado", []) or []
+        except LimiteExcedido as e:
+            # 429: se espera más tiempo y se reintenta (hasta 3 veces).
+            if espera_429 >= len(ESPERAS_429_LISTADO):
+                raise
+            espera = ESPERAS_429_LISTADO[espera_429]
+            espera_429 += 1
+            print(f"  429 en el listado del {fecha_ddmmaaaa}; esperando {espera}s", file=sys.stderr)
+            time.sleep(espera)
+            ultimo_error = e
+            continue
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code < 500:
                 raise
             ultimo_error = e
         except (requests.ConnectionError, requests.Timeout) as e:
             ultimo_error = e
-        if intento < 2:
-            print(f"  reintentando el listado del {fecha_ddmmaaaa} ({_sin_ticket(ultimo_error)})", file=sys.stderr)
-            time.sleep(PAUSA_REINTENTO * (intento + 1))
-    raise ultimo_error
+        fallos_5xx += 1
+        if fallos_5xx >= 3:
+            raise ultimo_error
+        print(f"  reintentando el listado del {fecha_ddmmaaaa} ({_sin_ticket(ultimo_error)})", file=sys.stderr)
+        time.sleep(PAUSA_REINTENTO * fallos_5xx)
 
 
 def obtener_detalle(codigo):
@@ -165,6 +189,7 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
     las que faltan NO se anotan, así que se revisan en la próxima ejecución."""
     previas = (registro or {}).get("revisadas", {})
     resultados = {}
+    seguidos_429 = 0
     en_corrida = set()
     saltadas = 0
     revisadas_ahora = 0
@@ -174,7 +199,7 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
     for fecha in fechas_ddmmaaaa:
         try:
             listado_basico = obtener_licitaciones_del_dia(fecha)
-        except requests.RequestException as e:
+        except (requests.RequestException, LimiteExcedido) as e:
             # Si falla el listado de un día, igual se revisa el otro.
             AVISOS_LICITACIONES.append(f"No se pudo obtener el listado del {fecha[:2]}-{fecha[2:4]}: {_sin_ticket(e)}")
             print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
@@ -198,7 +223,22 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
                 print(f"  {saltadas} ya revisadas antes (omitidas), {revisadas_ahora} revisadas ahora.")
                 return list(resultados.values())
             try:
-                detalle = obtener_detalle(codigo)
+                try:
+                    detalle = obtener_detalle(codigo)
+                except LimiteExcedido:
+                    time.sleep(ESPERA_429_DETALLE)
+                    detalle = obtener_detalle(codigo)
+                seguidos_429 = 0
+            except LimiteExcedido:
+                seguidos_429 += 1
+                if seguidos_429 >= MAX_429_SEGUIDOS:
+                    AVISOS_LICITACIONES.append(
+                        "Licitaciones incompleta: la API respondió 429 (límite de uso) repetidamente y se "
+                        f"detuvo la revisión tras {revisadas_ahora} nuevas; el resto se revisará en la próxima ejecución"
+                    )
+                    print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
+                    return list(resultados.values())
+                continue
             except requests.RequestException as e:
                 print(f"  aviso: no se pudo obtener detalle de {codigo}: {_sin_ticket(e)}", file=sys.stderr)
                 time.sleep(PAUSA_ENTRE_LLAMADAS)

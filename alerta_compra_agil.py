@@ -27,7 +27,8 @@ from common import PALABRAS_CLAVE, PALABRAS_CON_CONTEXTO, REGIONES_OBJETIVO, con
 
 BASE_URL = "https://api2.mercadopublico.cl"
 TICKET = os.environ.get("MP_TICKET_COMPRA_AGIL") or os.environ.get("MP_TICKET")
-TIMEOUT = 20
+TIMEOUT = 40
+REINTENTOS = 3
 TAMANO_PAGINA = 50  # máximo permitido por la API
 PAUSA_ENTRE_LLAMADAS = 0.5
 
@@ -72,9 +73,18 @@ def _buscar_pagina(keyword, numero_pagina):
         "numero_pagina": numero_pagina,
         "ordenar_por": "FechaPublicacion",
     }
-    resp = requests.get(
-        f"{BASE_URL}/v2/compra-agil", headers=_headers(), params=params, timeout=TIMEOUT
-    )
+    resp = None
+    for intento in range(REINTENTOS):
+        try:
+            resp = requests.get(
+                f"{BASE_URL}/v2/compra-agil", headers=_headers(), params=params, timeout=TIMEOUT
+            )
+            if resp.status_code < 500:
+                break
+        except (requests.Timeout, requests.ConnectionError):
+            if intento == REINTENTOS - 1:
+                raise
+        time.sleep(3 * (intento + 1))
     if resp.status_code == 429:
         print("  aviso: cuota diaria de la API de Compra Ágil agotada (429).", file=sys.stderr)
         raise CuotaAgotada()
@@ -138,6 +148,10 @@ def obtener_compra_agil():
                 )
                 _cerrar()
                 return list(vistos.values())
+            except (requests.RequestException, RuntimeError) as e:
+                ADVERTENCIAS.append(f"falló la búsqueda de '{palabra}' ({type(e).__name__}); se siguió con las demás")
+                print(f"  aviso: {ADVERTENCIAS[-1]}", file=sys.stderr)
+                break
             print(f"  '{palabra}' pág. {pagina}: {len(items)} resultado(s) de la API")
             for item in items:
                 codigo = item.get("codigo")
