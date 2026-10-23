@@ -176,26 +176,36 @@ def evaluar_licitacion(detalle):
     }
 
 
-def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
-    """fechas_ddmmaaaa: lista de fechas (típicamente [hoy, ayer]) — se
-    consultan todas y se combinan sin duplicados. Esto evita perder
-    licitaciones publicadas ayer después de la hora en que corrió el
-    script (la API v1 solo permite filtrar por un día exacto, no por
-    rango de horas).
+def _unidad(codigo):
+    """Primer número del código (ej. '4085' en '4085-46-LE26'): la unidad compradora."""
+    return str(codigo).split("-")[0]
 
-    registro: la memoria entre ejecuciones (estado.py). Si se entrega, las
-    licitaciones cuyo detalle ya se revisó antes se saltan sin consultar la
-    API, y las que se revisan ahora quedan anotadas. Si se agota el tiempo,
-    las que faltan NO se anotan, así que se revisan en la próxima ejecución."""
-    previas = (registro or {}).get("revisadas", {})
+
+def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
+    """fechas_ddmmaaaa: lista de fechas (típicamente [hoy, ayer]); se combinan
+    sin duplicados (la API v1 solo filtra por un día exacto).
+
+    registro: la memoria entre ejecuciones (estado.py). Sirve para:
+      - saltar licitaciones cuyo detalle ya se revisó;
+      - saltar las de unidades compradoras que ya se sabe que están FUERA de
+        las regiones objetivo (se aprende de cada detalle consultado);
+      - revisar primero las de unidades de tu región y después las
+        desconocidas, así si se acaba el tiempo lo importante ya está hecho.
+    Las que no alcanzan a revisarse NO se anotan: quedan para la próxima."""
+    if registro is None:
+        registro = {"revisadas": {}, "notificadas": {}, "unidades": {}}
+    previas = registro.get("revisadas", {})
+    unidades = registro.setdefault("unidades", {})
     resultados = {}
     seguidos_429 = 0
-    en_corrida = set()
-    saltadas = 0
     revisadas_ahora = 0
+    saltadas = 0
+    fuera_de_region = 0
     inicio = time.monotonic()
     AVISOS_LICITACIONES.clear()
 
+    # 1) Listados de todos los días
+    candidatas = {}
     for fecha in fechas_ddmmaaaa:
         try:
             listado_basico = obtener_licitaciones_del_dia(fecha)
@@ -205,57 +215,83 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
             print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
             continue
         print(f"{len(listado_basico)} licitaciones publicadas el {fecha}.")
-
         for item in listado_basico:
             codigo = item.get("CodigoExterno")
-            if not codigo or codigo in en_corrida:
-                continue
-            en_corrida.add(codigo)
-            if codigo in previas:
-                saltadas += 1
-                continue
-            if time.monotonic() - inicio > LIMITE_SEG_LICITACIONES:
+            if codigo:
+                candidatas.setdefault(codigo, item)
+
+    # 2) Descartar las ya revisadas y las de unidades fuera de región
+    pendientes = []
+    for codigo in candidatas:
+        if codigo in previas:
+            saltadas += 1
+            continue
+        u = unidades.get(_unidad(codigo))
+        if u is not None and not u.get("en"):
+            fuera_de_region += 1
+            continue
+        pendientes.append((0 if u is not None else 1, codigo))
+    pendientes.sort(key=lambda x: x[0])  # conocidas de tu región primero
+    print(f"  {saltadas} ya revisadas, {fuera_de_region} de unidades fuera de región (omitidas), "
+          f"{len(pendientes)} por consultar.")
+
+    # 3) Consultar el detalle
+    for _, codigo in pendientes:
+        # Puede haberse aprendido en esta misma corrida que la unidad está fuera de región.
+        u = unidades.get(_unidad(codigo))
+        if u is not None and not u.get("en"):
+            fuera_de_region += 1
+            continue
+        if time.monotonic() - inicio > LIMITE_SEG_LICITACIONES:
+            restantes = max(len(pendientes) - revisadas_ahora - fuera_de_region, 0)
+            AVISOS_LICITACIONES.append(
+                f"Licitaciones incompleta: se alcanzó el límite de {LIMITE_SEG_LICITACIONES // 60} min "
+                f"(se revisaron {revisadas_ahora} nuevas; quedan ~{restantes} para la próxima ejecución)"
+            )
+            print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
+            break
+        try:
+            try:
+                detalle = obtener_detalle(codigo)
+            except LimiteExcedido:
+                time.sleep(ESPERA_429_DETALLE)
+                detalle = obtener_detalle(codigo)
+            seguidos_429 = 0
+        except LimiteExcedido:
+            seguidos_429 += 1
+            if seguidos_429 >= MAX_429_SEGUIDOS:
                 AVISOS_LICITACIONES.append(
-                    f"Licitaciones incompleta: se alcanzó el límite de {LIMITE_SEG_LICITACIONES // 60} min "
-                    f"(se revisaron {revisadas_ahora} nuevas; el resto se revisará en la próxima ejecución)"
+                    "Licitaciones incompleta: la API respondió 429 (límite de uso) repetidamente y se "
+                    f"detuvo la revisión tras {revisadas_ahora} nuevas; el resto se revisará en la próxima ejecución"
                 )
                 print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
-                print(f"  {saltadas} ya revisadas antes (omitidas), {revisadas_ahora} revisadas ahora.")
-                return list(resultados.values())
-            try:
-                try:
-                    detalle = obtener_detalle(codigo)
-                except LimiteExcedido:
-                    time.sleep(ESPERA_429_DETALLE)
-                    detalle = obtener_detalle(codigo)
-                seguidos_429 = 0
-            except LimiteExcedido:
-                seguidos_429 += 1
-                if seguidos_429 >= MAX_429_SEGUIDOS:
-                    AVISOS_LICITACIONES.append(
-                        "Licitaciones incompleta: la API respondió 429 (límite de uso) repetidamente y se "
-                        f"detuvo la revisión tras {revisadas_ahora} nuevas; el resto se revisará en la próxima ejecución"
-                    )
-                    print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
-                    return list(resultados.values())
-                continue
-            except requests.RequestException as e:
-                print(f"  aviso: no se pudo obtener detalle de {codigo}: {_sin_ticket(e)}", file=sys.stderr)
-                time.sleep(PAUSA_ENTRE_LLAMADAS)
-                continue
-
-            if detalle:
-                revisadas_ahora += 1
-                if registro is not None:
-                    registro["revisadas"][codigo] = memoria.hoy()
-                match = evaluar_licitacion(detalle)
-                if match:
-                    resultados[codigo] = match
-                    print(f"  MATCH licitación: {codigo} - {match['nombre'][:60]}")
-
+                break
+            continue
+        except requests.RequestException as e:
+            print(f"  aviso: no se pudo obtener detalle de {codigo}: {_sin_ticket(e)}", file=sys.stderr)
             time.sleep(PAUSA_ENTRE_LLAMADAS)
+            continue
 
-    print(f"  {saltadas} ya revisadas antes (omitidas), {revisadas_ahora} revisadas ahora.")
+        if detalle:
+            revisadas_ahora += 1
+            registro["revisadas"][codigo] = memoria.hoy()
+            comprador = detalle.get("Comprador") or {}
+            # Solo se aprende la región de la unidad si el código de unidad que
+            # informa la API coincide con el prefijo del código (si no, no se
+            # confía en el atajo y se sigue consultando todo, como antes).
+            if str(comprador.get("CodigoUnidad", "")).strip() == _unidad(codigo):
+                unidades[_unidad(codigo)] = {
+                    "en": bool(region_coincide(comprador.get("RegionUnidad", "") or "")),
+                    "f": memoria.hoy(),
+                }
+            match = evaluar_licitacion(detalle)
+            if match:
+                resultados[codigo] = match
+                print(f"  MATCH licitación: {codigo} - {match['nombre'][:60]}")
+
+        time.sleep(PAUSA_ENTRE_LLAMADAS)
+
+    print(f"  {revisadas_ahora} revisadas ahora; {len(unidades)} unidades compradoras conocidas.")
     return list(resultados.values())
 
 

@@ -100,6 +100,13 @@ def _buscar_pagina(keyword, numero_pagina):
     return items, paginacion.get("numero_pagina", 1), paginacion.get("total_paginas", 1)
 
 
+def _describir(e):
+    """Tipo de error + código HTTP, para que el aviso diga qué pasó."""
+    resp = getattr(e, "response", None)
+    codigo = f" HTTP {resp.status_code}" if resp is not None else ""
+    return f"{type(e).__name__}{codigo}"
+
+
 def obtener_compra_agil():
     """Busca, para cada palabra clave configurada, las Compras Ágiles
     abiertas en las regiones objetivo. Devuelve una lista de dicts sin
@@ -135,7 +142,61 @@ def obtener_compra_agil():
         )
         print(RESUMEN)
 
-    for palabra in TERMINOS_BUSQUEDA:
+    def _procesar(item):
+        codigo = item.get("codigo")
+        if not codigo:
+            return
+        devueltas_api.add(codigo)
+        if codigo in vistos:
+            return
+        nombre = item.get("nombre", "") or ""
+        # El endpoint de listado ya filtró por 'q', pero igual
+        # verificamos localmente por si el match del buscador
+        # es más amplio de lo esperado (ej. coincide en otro campo).
+        if not contiene_palabra_clave_titulo(nombre):
+            descartadas[codigo] = nombre
+            print(f"  descartada por filtro: {codigo} - {nombre[:70]}")
+            return
+
+        institucion = item.get("institucion") or {}
+        montos = item.get("montos") or {}
+        fechas = item.get("fechas") or {}
+        estado = item.get("estado") or {}
+
+        vistos[codigo] = {
+            "codigo": codigo,
+            "nombre": nombre,
+            "organismo": institucion.get("organismo_comprador", ""),
+            "region": institucion.get("nombre_region", ""),
+            "presupuesto": f"${montos.get('monto_disponible_clp', 0):,}".replace(",", ".")
+            if montos.get("monto_disponible_clp") is not None
+            else "No informado",
+            "fecha_cierre": fechas.get("fecha_cierre", ""),
+            "estado": estado.get("glosa", ""),
+            "url": URL_DETALLE.format(codigo=codigo),
+        }
+        print(f"  MATCH: {codigo} - {nombre[:60]}")
+
+    fallidas = []
+    for palabra in list(TERMINOS_BUSQUEDA) + ["\0reintento"]:
+        if palabra == "\0reintento":
+            # Segunda oportunidad para las palabras que fallaron, tras una pausa.
+            if not fallidas:
+                break
+            time.sleep(20)
+            reintentar, fallidas = fallidas, []
+            for p2 in reintentar:
+                try:
+                    items, _, _ = _buscar_pagina(p2, 1)
+                except CuotaAgotada:
+                    ADVERTENCIAS.append("Se agotó la cuota de la API de Compra Ágil (HTTP 429) al reintentar")
+                    break
+                except (requests.RequestException, RuntimeError) as e:
+                    ADVERTENCIAS.append(f"falló la búsqueda de '{p2}' ({_describir(e)})")
+                    continue
+                for item in items:
+                    _procesar(item)
+            break
         print(f"Compra Ágil: buscando '{palabra}'...")
         pagina = 1
         while True:
@@ -149,44 +210,12 @@ def obtener_compra_agil():
                 _cerrar()
                 return list(vistos.values())
             except (requests.RequestException, RuntimeError) as e:
-                ADVERTENCIAS.append(f"falló la búsqueda de '{palabra}' ({type(e).__name__}); se siguió con las demás")
-                print(f"  aviso: {ADVERTENCIAS[-1]}", file=sys.stderr)
+                fallidas.append(palabra)
+                print(f"  aviso: falló la búsqueda de '{palabra}' ({_describir(e)}); se reintenta al final", file=sys.stderr)
                 break
             print(f"  '{palabra}' pág. {pagina}: {len(items)} resultado(s) de la API")
             for item in items:
-                codigo = item.get("codigo")
-                if not codigo:
-                    continue
-                devueltas_api.add(codigo)
-                if codigo in vistos:
-                    continue
-                nombre = item.get("nombre", "") or ""
-                # El endpoint de listado ya filtró por 'q', pero igual
-                # verificamos localmente por si el match del buscador
-                # es más amplio de lo esperado (ej. coincide en otro campo).
-                if not contiene_palabra_clave_titulo(nombre):
-                    descartadas[codigo] = nombre
-                    print(f"  descartada por filtro: {codigo} - {nombre[:70]}")
-                    continue
-
-                institucion = item.get("institucion") or {}
-                montos = item.get("montos") or {}
-                fechas = item.get("fechas") or {}
-                estado = item.get("estado") or {}
-
-                vistos[codigo] = {
-                    "codigo": codigo,
-                    "nombre": nombre,
-                    "organismo": institucion.get("organismo_comprador", ""),
-                    "region": institucion.get("nombre_region", ""),
-                    "presupuesto": f"${montos.get('monto_disponible_clp', 0):,}".replace(",", ".")
-                    if montos.get("monto_disponible_clp") is not None
-                    else "No informado",
-                    "fecha_cierre": fechas.get("fecha_cierre", ""),
-                    "estado": estado.get("glosa", ""),
-                    "url": URL_DETALLE.format(codigo=codigo),
-                }
-                print(f"  MATCH: {codigo} - {nombre[:60]}")
+                _procesar(item)
 
             if pagina_actual >= total_paginas:
                 break
