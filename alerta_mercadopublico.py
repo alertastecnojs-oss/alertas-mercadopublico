@@ -201,6 +201,7 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
     revisadas_ahora = 0
     saltadas = 0
     fuera_de_region = 0
+    n_429 = 0
     inicio = time.monotonic()
     AVISOS_LICITACIONES.clear()
 
@@ -254,6 +255,7 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
             try:
                 detalle = obtener_detalle(codigo)
             except LimiteExcedido:
+                n_429 += 1
                 time.sleep(ESPERA_429_DETALLE)
                 detalle = obtener_detalle(codigo)
             seguidos_429 = 0
@@ -291,7 +293,8 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
 
         time.sleep(PAUSA_ENTRE_LLAMADAS)
 
-    print(f"  {revisadas_ahora} revisadas ahora; {len(unidades)} unidades compradoras conocidas.")
+    print(f"  {revisadas_ahora} revisadas ahora en {(time.monotonic() - inicio) / 60:.1f} min "
+          f"({n_429} veces 429); {len(unidades)} unidades compradoras conocidas.")
     return list(resultados.values())
 
 

@@ -64,12 +64,12 @@ def _headers():
     return {"ticket": TICKET}
 
 
-def _buscar_pagina(keyword, numero_pagina):
+def _buscar_pagina(keyword, numero_pagina, tamano=None):
     params = {
         "q": keyword,
         "region": _REGIONES_PARAM,
         "estado": "publicada",
-        "tamano_pagina": TAMANO_PAGINA,
+        "tamano_pagina": tamano or TAMANO_PAGINA,
         "numero_pagina": numero_pagina,
         "ordenar_por": "FechaPublicacion",
     }
@@ -187,7 +187,7 @@ def obtener_compra_agil():
             reintentar, fallidas = fallidas, []
             for p2 in reintentar:
                 try:
-                    items, _, _ = _buscar_pagina(p2, 1)
+                    items, _, _ = _buscar_pagina(p2, 1, tamano=10)  # página chica: más liviana para el servidor
                 except CuotaAgotada:
                     ADVERTENCIAS.append("Se agotó la cuota de la API de Compra Ágil (HTTP 429) al reintentar")
                     break
