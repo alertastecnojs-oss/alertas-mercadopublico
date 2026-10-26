@@ -2,9 +2,9 @@ name: Alerta diaria Mercado Público
 
 on:
   schedule:
-    # 12:00 UTC ≈ 08:00-09:00 hora de Chile continental (según horario de verano).
+    # 10:00 UTC = 07:00 hora de Chile en verano (06:00 en invierno): ChileCompra recomienda las consultas masivas entre 22:00 y 07:00.
     # Se ejecuta de lunes a sábado (1-6).
-    - cron: '0 12 * * 1-6'
+    - cron: '0 10 * * 1-6'
   workflow_dispatch: {}  # permite ejecutarlo manualmente desde la pestaña Actions para probar
 
 jobs:
