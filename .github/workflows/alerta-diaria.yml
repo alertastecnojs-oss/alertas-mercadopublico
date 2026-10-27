@@ -2,9 +2,9 @@ name: Alerta diaria Mercado Público
 
 on:
   schedule:
-    # 10:00 UTC = 07:00 hora de Chile en verano (06:00 en invierno): ChileCompra recomienda las consultas masivas entre 22:00 y 07:00.
+    # 09:37 UTC = 06:37 hora de Chile en verano (05:37 en invierno); no se usa la hora en punto porque GitHub atrasa o descarta las ejecuciones de esa hora por exceso de tráfico: ChileCompra recomienda las consultas masivas entre 22:00 y 07:00.
     # Se ejecuta de lunes a sábado (1-6).
-    - cron: '0 10 * * 1-6'
+    - cron: '37 9 * * 1-6'
   workflow_dispatch: {}  # permite ejecutarlo manualmente desde la pestaña Actions para probar
 
 jobs:
