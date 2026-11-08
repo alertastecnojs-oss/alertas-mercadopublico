@@ -42,6 +42,7 @@ jobs:
           # Tiempo máximo (segundos) para revisar el detalle de las licitaciones.
           # Si se supera, se envía el correo igual con lo encontrado y un aviso.
           LIMITE_SEG_LICITACIONES: "1200"
+          LIMITE_TOTAL_SEG: "1320"   # 22 min en total (el job se corta a los 30)
         run: python alerta_mercadopublico.py
 
       - name: Guardar memoria para la próxima ejecución
