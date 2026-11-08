@@ -61,6 +61,15 @@ PAUSA_REINTENTO = 5  # segundos (se multiplica por el número de intento)
 # que quedó incompleto. Así nunca se pierde el correo por el timeout de
 # 25 min del workflow.
 LIMITE_SEG_LICITACIONES = int(os.environ.get("LIMITE_SEG_LICITACIONES", str(14 * 60)))
+# Tope de TODA la ejecución (Compra Ágil + Licitaciones + correo). Debe quedar
+# por debajo del timeout-minutes del workflow para que el correo salga siempre.
+LIMITE_TOTAL_SEG = int(os.environ.get("LIMITE_TOTAL_SEG", str(22 * 60)))
+MARGEN_FINAL_SEG = 120  # reservado para terminar la última consulta y enviar el correo
+T0 = time.monotonic()
+
+
+def segundos_restantes():
+    return LIMITE_TOTAL_SEG - (time.monotonic() - T0)
 AVISOS_LICITACIONES = []
 
 # URL pública para ver el detalle de una licitación en el portal
@@ -82,7 +91,7 @@ class LimiteExcedido(Exception):
     """La API respondió 429 (Too Many Requests)."""
 
 
-ESPERAS_429_LISTADO = (30, 90, 180)  # segundos entre reintentos del listado
+ESPERAS_429_LISTADO = (20, 60, 120)  # segundos entre reintentos del listado
 ESPERA_429_DETALLE = 30
 MAX_429_SEGUIDOS = 3  # tras tantos 429 seguidos en detalle se corta la revisión
 
@@ -116,6 +125,8 @@ def obtener_licitaciones_del_dia(fecha_ddmmaaaa):
             if espera_429 >= len(ESPERAS_429_LISTADO):
                 raise
             espera = ESPERAS_429_LISTADO[espera_429]
+            if espera > segundos_restantes() - MARGEN_FINAL_SEG:
+                raise
             espera_429 += 1
             print(f"  429 en el listado del {fecha_ddmmaaaa}; esperando {espera}s", file=sys.stderr)
             time.sleep(espera)
@@ -237,16 +248,21 @@ def obtener_licitaciones(fechas_ddmmaaaa, registro=None):
           f"{len(pendientes)} por consultar.")
 
     # 3) Consultar el detalle
+    limite_detalle = min(
+        LIMITE_SEG_LICITACIONES - (time.monotonic() - inicio),
+        segundos_restantes() - MARGEN_FINAL_SEG,
+    )
+    t_detalle = time.monotonic()
     for _, codigo in pendientes:
         # Puede haberse aprendido en esta misma corrida que la unidad está fuera de región.
         u = unidades.get(_unidad(codigo))
         if u is not None and not u.get("en"):
             fuera_de_region += 1
             continue
-        if time.monotonic() - inicio > LIMITE_SEG_LICITACIONES:
+        if time.monotonic() - t_detalle > limite_detalle:
             restantes = max(len(pendientes) - revisadas_ahora - fuera_de_region, 0)
             AVISOS_LICITACIONES.append(
-                f"Licitaciones incompleta: se alcanzó el límite de {LIMITE_SEG_LICITACIONES // 60} min "
+                f"Licitaciones incompleta: se alcanzó el límite de tiempo de la ejecución "
                 f"(se revisaron {revisadas_ahora} nuevas; quedan ~{restantes} para la próxima ejecución)"
             )
             print(f"AVISO: {AVISOS_LICITACIONES[-1]}", file=sys.stderr)
@@ -456,7 +472,10 @@ def main():
           f"{len(registro['notificadas'])} avisos anteriores.")
 
     print("=== Compra Ágil (API oficial) ===")
-    compra_agil, error_compra_agil = obtener_compra_agil_seguro()
+    try:
+        compra_agil, error_compra_agil = obtener_compra_agil_seguro()
+    except Exception as e:  # nada debe impedir que salga el correo
+        compra_agil, error_compra_agil = [], f"Compra Ágil falló: {_sin_ticket(e)}"
     # Solo las que no se avisaron antes
     compra_agil_nueva = [c for c in compra_agil if c["codigo"] not in registro["notificadas"]]
     ya_avisadas = len(compra_agil) - len(compra_agil_nueva)
@@ -464,12 +483,24 @@ def main():
     print(f"=== Licitaciones ({' y '.join(fechas_api)}) ===")
     try:
         licitaciones = obtener_licitaciones(fechas_api, registro)
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"Error consultando licitaciones: {_sin_ticket(e)}", file=sys.stderr)
         licitaciones = []
         AVISOS_LICITACIONES.append(f"No se pudieron consultar las licitaciones hoy: {_sin_ticket(e)}")
     licitaciones = [l for l in licitaciones if l["codigo"] not in registro["notificadas"]]
     aviso_licitaciones = "; ".join(AVISOS_LICITACIONES) or None
+
+    # Guardado intermedio: el progreso (licitaciones revisadas y unidades
+    # aprendidas) se conserva aunque el correo falle o la ejecución se corte.
+    # Las que coinciden NO se anotan todavía: se anotan cuando el correo salió.
+    try:
+        import copy
+        intermedio = copy.deepcopy(registro)
+        for l in licitaciones:
+            intermedio["revisadas"].pop(l["codigo"], None)
+        memoria.guardar(intermedio)
+    except Exception as e:
+        print(f"aviso: no se pudo guardar la memoria intermedia: {e}", file=sys.stderr)
 
     total = len(licitaciones) + len(compra_agil_nueva)
     asunto = f"Alertas Mercado Público — {fecha_legible} ({total} coincidencias)"

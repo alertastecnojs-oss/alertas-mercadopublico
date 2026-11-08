@@ -27,8 +27,9 @@ from common import PALABRAS_CLAVE, PALABRAS_CON_CONTEXTO, REGIONES_OBJETIVO, con
 
 BASE_URL = "https://api2.mercadopublico.cl"
 TICKET = os.environ.get("MP_TICKET_COMPRA_AGIL") or os.environ.get("MP_TICKET")
-TIMEOUT = 40
+TIMEOUT = 30
 REINTENTOS = 3
+PRESUPUESTO_SEG = int(os.environ.get("LIMITE_COMPRA_AGIL_SEG", "360"))  # tope para toda la sección
 TAMANO_PAGINA = 50  # máximo permitido por la API
 PAUSA_ENTRE_LLAMADAS = 0.5
 
@@ -178,7 +179,15 @@ def obtener_compra_agil():
         print(f"  MATCH: {codigo} - {nombre[:60]}")
 
     fallidas = []
+    t_inicio = time.monotonic()
     for palabra in list(TERMINOS_BUSQUEDA) + ["\0reintento"]:
+        if time.monotonic() - t_inicio > PRESUPUESTO_SEG:
+            ADVERTENCIAS.append(
+                f"se agotó el tiempo asignado a Compra Ágil ({PRESUPUESTO_SEG // 60} min); "
+                "la búsqueda quedó incompleta"
+                + (f" (se alcanzó a revisar hasta '{palabra}')" if palabra != "\0reintento" else "")
+            )
+            break
         if palabra == "\0reintento":
             # Segunda oportunidad para las palabras que fallaron, tras una pausa.
             if not fallidas:
@@ -186,6 +195,9 @@ def obtener_compra_agil():
             time.sleep(20)
             reintentar, fallidas = fallidas, []
             for p2 in reintentar:
+                if time.monotonic() - t_inicio > PRESUPUESTO_SEG:
+                    ADVERTENCIAS.append(f"no alcanzó el tiempo para reintentar '{p2}' y las siguientes")
+                    break
                 try:
                     items, _, _ = _buscar_pagina(p2, 1, tamano=10)  # página chica: más liviana para el servidor
                 except CuotaAgotada:
